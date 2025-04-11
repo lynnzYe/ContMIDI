@@ -14,9 +14,11 @@ import note_seq
 import pretty_midi as pm
 import numpy as np
 import torch
-from note_seq import PerformanceEvent
-from tensorflow.python.eager.backprop import op_attr_type
+import random
+import tqdm
 from torch.utils.data import Dataset
+from pathlib import Path
+import os
 
 from src.util.magenta.models.performance_rnn import performance_model
 from src.util.magenta.pipelines import performance_pipeline
@@ -216,6 +218,10 @@ def convert_mixed_tokens_to_ids(tokenseq_list, mask_list, type_list, max_seq_len
     def list2d_to_tensor(list2d):
         return torch.stack([torch.stack(ll) for ll in list2d])
 
+    input_ids_lists = []
+    out_masks = []
+    out_types = []
+
     # Pad right and convert to tensor
     ids_pad = torch.nn.functional.one_hot(torch.tensor(encoder_decoder.default_event_label),
                                           num_classes=encoder_decoder.input_size)
@@ -225,20 +231,19 @@ def convert_mixed_tokens_to_ids(tokenseq_list, mask_list, type_list, max_seq_len
                   if not is_continuous_token(tokenseq_list[i_token_list][itk]) else
                   fill_tensor(tokenseq_list[i_token_list][itk].event_value, encoder_decoder.input_size)
                   for itk in range(len(tokenseq_list[i_token_list]))]
-        # TODO: change encoder decoder input size -> duration/velocity tokens no longer needed
 
         n_pad = max_seq_len - len(tokenseq_list[i_token_list])
 
         if n_pad < 0:
             raise ValueError("Token list exceeds max_seq_len")
         if n_pad > 0:
-            tokenseq_list[i_token_list] = tk_ids + [ids_pad] * n_pad  # Dummy token
-            mask_list[i_token_list] = mask_list[i_token_list] + [0] * n_pad
-            type_list[i_token_list] = type_list[i_token_list] + [-1] * n_pad  # Dummy type
+            input_ids_lists += [tk_ids + [ids_pad] * n_pad]  # Dummy token
+            out_masks += [mask_list[i_token_list] + [0] * n_pad]
+            out_types += [type_list[i_token_list] + [-1] * n_pad]  # Dummy type
         else:
-            tokenseq_list[i_token_list] = tk_ids
+            input_ids_lists += [tk_ids]
 
-    return list2d_to_tensor(tokenseq_list), torch.tensor(mask_list), torch.tensor(type_list)
+    return list2d_to_tensor(input_ids_lists), torch.tensor(out_masks), torch.tensor(out_types)
 
 
 def convert_to_mixed_type_tokens(token_ids, mask, encoder_decoder):
@@ -309,6 +314,104 @@ def create_input_from_midi(file_path, config):
                                        encoder_decoder=encoder_decoder)
 
 
+def collect_files(data_dir, key=None, negative_key=None):
+    if key is None:
+        key = []
+    if negative_key is None:
+        negative_key = []
+    out_paths = []
+    for root, dirs, files in os.walk(data_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            file_dir, file_name = os.path.split(file_path)
+            if all(k in file_name for k in key) and all(nk not in file_name for nk in negative_key):
+                out_paths.append(file_path)
+    return out_paths
+
+
+class MixTokenTypeDataset(Dataset):
+    def __init__(self, encodings: dict):
+        """
+        :param encodings: {
+                            'input_ids': ...,
+                            'mask': ...,
+                            'type': ...,
+
+        """
+        assert 'input_ids' in encodings.keys() and 'mask' in encodings.keys() and 'type' in encodings.keys()
+        self.encodings = encodings
+
+    def __len__(self):
+        return len(self.encodings['input_ids'])
+
+    def __getitem__(self, idx):
+        item = {
+            'input_ids': torch.tensor(self.encodings['input_ids'][idx], dtype=torch.long),
+            'masks': torch.tensor(self.encodings['attention_mask'][idx], dtype=torch.long),
+            'types': torch.tensor(self.encodings['token_type_ids'][idx], dtype=torch.long)
+        }
+        return item
+
+
+def create_dataset(midi_dir, save_dir=None, split_ratios=(0.8, 0.1, 0.1), seed=0):
+    """
+    Create dataset for continuous MIDI training
+    :param midi_dir:
+    :param save_dir: create directory to store pt data for each sample (will contain many files)
+    :param split_ratios: train, val, test
+    :param seed: for train test split
+    :return:
+    """
+    save_dir = Path(save_dir)
+    (save_dir / 'train').mkdir(parents=True, exist_ok=True)
+    (save_dir / 'val').mkdir(parents=True, exist_ok=True)
+    (save_dir / 'test').mkdir(parents=True, exist_ok=True)
+
+    midi_files = collect_files(midi_dir, key=['.mid'])
+    random.seed(seed)
+    random.shuffle(midi_files)
+
+    # Split files
+    total = len(midi_files)
+    n_train = int(split_ratios[0] * total)
+    n_val = int(split_ratios[1] * total)
+
+    train_files = midi_files[:n_train]
+    val_files = midi_files[n_train:n_train + n_val]
+    test_files = midi_files[n_train + n_val:]
+
+    splits = {
+        'train': train_files,
+        'val': val_files,
+        'test': test_files,
+    }
+
+    # TODO @Bmois: change encoder decoder input size -> duration/velocity tokens no longer needed
+    config = performance_model.default_configs['performance']
+
+    # Process and save
+    for split_name, files in splits.items():
+        for i, midi_file in enumerate(tqdm.tqdm(files, desc=f"Processing {split_name}")):
+            try:
+                token_ids, masks, types = create_input_from_midi(midi_file, config)
+            except Exception as e:
+                print(f"Skipping {midi_file}: {e}")
+                continue
+
+            sample = {
+                'input_ids': token_ids,
+                'masks': masks,
+                'types': types,
+            }
+
+            out_path = save_dir / split_name / f"sample_{i:05d}.pt"
+            torch.save(sample, out_path)
+
+
+def load_dataset(data_path):
+    return torch.load(data_path)
+
+
 def ftest_decode_ids():
     token_ids, mask = prepare_token_ids('debug_files/horowitz_gb.mid',
                                         perf_config=performance_model.default_configs['performance'])
@@ -326,31 +429,11 @@ def ftest_create_input():
     pass
 
 
-class MixTokenTypeDataset(Dataset):
-    def __init__(self, encodings):
-        """
-        :param encodings: {
-                            'input_ids': ...,
-                            'mask': ...,
-                            'type': ...,
-
-        """
-        self.encodings = encodings
-
-    def __len__(self):
-        return len(self.encodings['input_ids'])
-
-    def __getitem__(self, idx):
-        item = {
-            'input_ids': torch.tensor(self.encodings['input_ids'][idx], dtype=torch.long),
-            'attention_mask': torch.tensor(self.encodings['attention_mask'][idx], dtype=torch.long),
-            'token_type_ids': torch.tensor(self.encodings['token_type_ids'][idx], dtype=torch.long)
-        }
-        return item
-
-
 if __name__ == "__main__":
     ''''''
-    ftest_create_input()
+    data_path = '/Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro-v3.0.0'
+    save_path = '/Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data'
+    create_dataset(data_path, save_dir=save_path)
+    # ftest_create_input()
     # ftest_merge_timeshifts()
     # ftest_decode_ids()

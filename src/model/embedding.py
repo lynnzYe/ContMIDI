@@ -8,10 +8,11 @@ import torch.nn as nn
 
 
 class HybridEmbedding(nn.Module):
-    def __init__(self, vocab_size, embed_dim, continuous_dim):
+    def __init__(self, discrete_vocab_size, continuous_dim, embed_dim, max_len):
         super().__init__()
-        self.token_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
         self.continuous_projection = nn.Linear(continuous_dim, embed_dim)
+        self.position_embedding = torch.nn.Embedding(max_len, embed_dim)
 
     def forward(self, discrete_tokens, continuous_features, token_types):
         """
@@ -20,12 +21,11 @@ class HybridEmbedding(nn.Module):
         B, T = token_types.shape
         out = torch.zeros(B, T, self.token_embedding.embedding_dim, device=discrete_tokens.device)
 
-        discrete_mask = token_types == 'discrete'
-        continuous_mask = token_types == 'continuous'
-
-        if discrete_mask.any():
-            out[discrete_mask] = self.token_embedding(discrete_tokens[discrete_mask])
-        if continuous_mask.any():
-            out[continuous_mask] = self.continuous_projection(continuous_features[continuous_mask])
+        out[token_types == 1] = self.token_embedding(discrete_tokens[token_types == 1])
+        out[token_types == 0] = self.continuous_projection(continuous_features[token_types == 0])
 
         return out
+
+
+if __name__ == '__main__':
+    pass
