@@ -47,8 +47,8 @@ if __name__ == '__main__':
     seq_len = 128
     vocab_size = 356
 
-    token_ids = torch.rand([batch_size, seq_len, vocab_size])
-    types = torch.randint(0, 1, [batch_size, seq_len])
+    token_ids = torch.randint(0, 356, [batch_size, seq_len])
+    types = torch.randint(0, 2, [batch_size, seq_len])
 
     emb = HybridEmbedding(vocab_size, 4, seq_len)
     emb.forward(token_ids, types)
