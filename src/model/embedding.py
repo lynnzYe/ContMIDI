@@ -7,11 +7,37 @@ import torch
 import torch.nn as nn
 
 
+def timeshift_fe(t):
+    """
+    Feature extraction for timeshift value
+    :param t:
+    :return:
+    """
+    t = torch.clamp(t, min=1e-3)
+    return torch.stack([t, torch.log(t), t ** 2, t ** 0.5], dim=-1)
+
+
+def velocity_fe(v):
+    """
+    Feature extraction for velocity value
+    :param v:
+    :return:
+    """
+    # Normalize to avoid log(0)
+    v = torch.clamp(v, min=1e-3)
+    return torch.stack([v, torch.log(v), v ** 2, v ** 0.5], dim=-1)
+
+
 class HybridEmbedding(nn.Module):
     def __init__(self, discrete_vocab_size, embed_dim, max_len):
         super().__init__()
         self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
-        self.continuous_projection = nn.Linear(1, embed_dim)  # Place holder TODO @Bmois
+        self.timeshift_embedding = nn.Sequential(
+            nn.Linear(4, embed_dim),
+            nn.ReLU())
+        self.velocity_embedding = nn.Sequential(
+            nn.Linear(4, embed_dim),
+            nn.ReLU())
         self.position_embedding = torch.nn.Embedding(max_len, embed_dim)
 
     def forward(self, input_ids, token_types):
@@ -29,11 +55,15 @@ class HybridEmbedding(nn.Module):
             embeddings[discrete_mask] = discrete_emb[discrete_mask]
 
         # --- Continuous values ---
-        continuous_mask = (token_types == 1)
-        if continuous_mask.any():
-            cont_vals = input_ids.float().unsqueeze(-1)  # shape: (B, T, 1)
-            continuous_emb = self.continuous_projection(cont_vals)
-            embeddings[continuous_mask] = continuous_emb[continuous_mask]
+        timeshift_mask = (token_types == 1)
+        if timeshift_mask.any():
+            ts_feat = timeshift_fe(input_ids[timeshift_mask].float())
+            embeddings[timeshift_mask] = self.timeshift_embedding(ts_feat)
+
+        velocity_mask = (token_types == 2)
+        if velocity_mask.any():
+            vel_feat = velocity_fe(input_ids[velocity_mask].float())
+            embeddings[velocity_mask] = self.velocity_embedding(vel_feat)
 
         # --- Add position embedding ---
         pos_ids = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
@@ -50,6 +80,6 @@ if __name__ == '__main__':
     token_ids = torch.randint(0, 356, [batch_size, seq_len])
     types = torch.randint(0, 2, [batch_size, seq_len])
 
-    emb = HybridEmbedding(vocab_size, 4, seq_len)
+    emb = HybridEmbedding(vocab_size, 16, seq_len)
     emb.forward(token_ids, types)
     pass

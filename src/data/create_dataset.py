@@ -7,7 +7,8 @@ Data Structure per batch:
     - [input_ids, attention_masks]
     - [token_types]
         - 'discrete': 0,
-        - 'continuous': 1
+        - 'timeshift': 1,
+        - 'velocity': 2
 """
 
 import note_seq
@@ -211,6 +212,15 @@ def is_continuous_token(performance_event: note_seq.PerformanceEvent):
             or performance_event.event_type == note_seq.PerformanceEvent.VELOCITY)
 
 
+def get_token_type(performance_event: note_seq.PerformanceEvent):
+    if performance_event.event_type == note_seq.PerformanceEvent.TIME_SHIFT:
+        return 1
+    elif performance_event.event_type == note_seq.PerformanceEvent.VELOCITY:
+        return 2
+    else:
+        return 0
+
+
 def convert_mixed_tokens_to_ids(tokenseq_list, mask_list, type_list, max_seq_len, encoder_decoder):
     def fill_tensor(value, tensor_len):
         return torch.cat([torch.tensor([value], dtype=torch.float32),
@@ -285,7 +295,7 @@ def convert_to_mixed_type_tokens(token_ids, mask, encoder_decoder):
                     curr_timeshift_value = -1
                 merged_tokens.append(token)
                 merged_masks.append(mask[i][i_token].item())  # Mask assumed to be of type tensor
-                token_types.append(int(is_continuous_token(token)))
+                token_types.append(get_token_type(performance_event=token))
             pass
         if curr_timeshift_value >= 0:
             # Final pass

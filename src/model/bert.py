@@ -38,7 +38,7 @@ class BertAttentionHead(torch.nn.Module):
         weights = (q @ k.transpose(-2, -1)) / math.sqrt(n_embed)  # (B, Seq_len, Seq_len)
         weights = weights.masked_fill(mask == 0, -1e9)  # mask out not attended tokens
 
-        scores = F.softmax(weights, dim=-1)
+        scores = torch.softmax(weights, dim=-1)
         scores = self.dropout(scores)
 
         context = scores @ v
@@ -158,8 +158,7 @@ class NanoBERT(torch.nn.Module):
         """
         super().__init__()
 
-        self.embedding = HybridEmbedding(vocab_size, continuous_dim=continuous_dim, embed_dim=n_embed,
-                                         max_len=max_seq_len)
+        self.embedding = HybridEmbedding(discrete_vocab_size=vocab_size, embed_dim=n_embed, max_len=max_seq_len)
 
         self.encoder = BertEncoder(n_layers, n_heads, dropout, n_embed)
 
