@@ -40,6 +40,11 @@ class HybridEmbedding(nn.Module):
             nn.ReLU())
         self.position_embedding = torch.nn.Embedding(max_len, embed_dim)
 
+        self.discrete_layer_norm = nn.LayerNorm(embed_dim)
+        self.timeshift_layer_norm = nn.LayerNorm(embed_dim)
+        self.velocity_layer_norm = nn.LayerNorm(embed_dim)
+        self.final_layer_norm = nn.LayerNorm(embed_dim)
+
     def forward(self, input_ids, token_types):
         """
         token_types: tensor of shape (batch, seq_len), values are 'discrete' or 'continuous'
@@ -51,23 +56,24 @@ class HybridEmbedding(nn.Module):
         # --- Discrete tokens ---
         discrete_mask = (token_types == 0)  # (B, T)
         if discrete_mask.any():
-            discrete_emb = self.token_embedding(input_ids)  # (B, T, D)
+            discrete_emb = self.discrete_layer_norm(self.token_embedding(input_ids))
             embeddings[discrete_mask] = discrete_emb[discrete_mask]
 
         # --- Continuous values ---
         timeshift_mask = (token_types == 1)
         if timeshift_mask.any():
             ts_feat = timeshift_fe(input_ids[timeshift_mask].float())
-            embeddings[timeshift_mask] = self.timeshift_embedding(ts_feat)
+            embeddings[timeshift_mask] = self.timeshift_layer_norm(self.timeshift_embedding(ts_feat))
 
         velocity_mask = (token_types == 2)
         if velocity_mask.any():
             vel_feat = velocity_fe(input_ids[velocity_mask].float())
-            embeddings[velocity_mask] = self.velocity_embedding(vel_feat)
+            embeddings[velocity_mask] = self.velocity_layer_norm(self.velocity_embedding(vel_feat))
 
         # --- Add position embedding ---
         pos_ids = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
         embeddings += self.position_embedding(pos_ids)
+        embeddings = self.final_layer_norm(embeddings)
 
         return embeddings
 

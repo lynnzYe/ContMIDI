@@ -8,6 +8,7 @@ import torch.functional as F
 import math
 
 from src.model.embedding import HybridEmbedding
+from src.util.definitions import IGNORE_LABEL_INDEX
 
 
 class BertAttentionHead(torch.nn.Module):
@@ -146,16 +147,7 @@ class NanoBERT(torch.nn.Module):
     This implementation does not cover the Seq2Seq problem, but can be easily extended to that.
     """
 
-    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, continuous_dim=3, max_seq_len=16):
-        """
-
-        :param vocab_size: size of the vocabulary that tokenizer is using
-        :param n_layers: number of BERT layer in the model (default=2)
-        :param n_heads: number of heads in the MultiHeaded Self Attention Mechanism (default=1)
-        :param dropout: hidden dropout of the BERT model (default=0.1)
-        :param n_embed: hidden embeddings dimensionality (default=3)
-        :param max_seq_len: max length of the input sequence (default=16)
-        """
+    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16):
         super().__init__()
 
         self.embedding = HybridEmbedding(discrete_vocab_size=vocab_size, embed_dim=n_embed, max_len=max_seq_len)
@@ -170,7 +162,7 @@ class NanoBERT(torch.nn.Module):
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
-        emb_output = self.embedding(input_ids)
+        emb_output = self.embedding(input_ids, token_type_ids)
 
         # mask = (input_ids > 0).unsqueeze(1).repeat(1, input_ids.size(1), 1)
 
@@ -203,7 +195,7 @@ class NanoBertMLM(torch.nn.Module):
 
         loss = None
         if labels is not None:
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=100)  # TODO @Bmois set label ignore index
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL_INDEX)  # TODO @Bmois set label ignore index
             loss = loss_fct(prediction_scores.view(-1, self.cls[-1].out_features), labels.view(-1))
         # TODO add loss for regression
 
@@ -211,7 +203,37 @@ class NanoBertMLM(torch.nn.Module):
 
 
 def main():
-    print("Hello, world!")
+    # Test configuration
+    vocab_size = 356
+    max_seq_len = 128
+    batch_size = 8
+
+    # Initialize model
+    model = NanoBertMLM(vocab_size=vocab_size, max_seq_len=max_seq_len)
+
+    # Generate random input data
+    input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
+    token_type_ids = torch.randint(0, 2, [batch_size, max_seq_len])
+    attention_mask = torch.ones_like(input_ids)
+    labels = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
+
+    # Set some labels to ignore index to simulate masked labels
+    labels[torch.rand_like(labels, dtype=torch.float) < 0.2] = IGNORE_LABEL_INDEX
+
+    # Perform a forward pass
+    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():
+        loss, prediction_scores = model(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
+                                        labels=labels)
+
+    # Check output
+    print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
+    print(f"Prediction scores shape: {prediction_scores.shape}")
+
+    # Assertions to verify correct output
+    assert prediction_scores.shape == (batch_size, max_seq_len, vocab_size), "Incorrect prediction scores shape"
+    if loss is not None:
+        assert isinstance(loss.item(), float), "Loss is not a float value"
 
 
 if __name__ == "__main__":
