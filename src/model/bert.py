@@ -6,9 +6,11 @@ Brief:
 import torch
 import torch.functional as F
 import math
+import pytorch_lightning as pl
 
 from src.model.embedding import HybridEmbedding
-from src.util.definitions import IGNORE_LABEL_INDEX
+from src.model.loss import LossWeighting, GradientsLossWeighting, NoteCrossEntropy, VelocityLoss, TimeshiftLoss
+from src.util.definitions import IGNORE_LABEL_INDEX, NOTE_TYPE, TS_TYPE, VEL_TYPE
 
 
 class BertAttentionHead(torch.nn.Module):
@@ -85,6 +87,9 @@ class FeedForward(torch.nn.Module):
 
         return out
 
+    def get_last_layer_weights(self):
+        return self.ffwd[2].weight
+
 
 class BertLayer(torch.nn.Module):
     """
@@ -123,6 +128,9 @@ class BertEncoder(torch.nn.Module):
             x = layer(x, mask)
 
         return x
+
+    def get_last_layer_weights(self):
+        return self.layers[-1].feed_forward.get_last_layer_weights()
 
 
 class BertPooler(torch.nn.Module):
@@ -182,24 +190,77 @@ class NanoBertMLM(torch.nn.Module):
         super().__init__()
         self.bert = NanoBERT(vocab_size=vocab_size, n_layers=n_layers, n_heads=n_heads, dropout=dropout,
                              n_embed=n_embed, max_seq_len=max_seq_len)
-        self.cls = torch.nn.Sequential(
+        self.classifier = torch.nn.Sequential(
             torch.nn.Linear(in_features=n_embed, out_features=n_embed),
             torch.nn.ReLU(),
             torch.nn.Dropout(dropout),
             torch.nn.Linear(in_features=n_embed, out_features=vocab_size)
         )
+        # Predicts value [0, 1]
+        self.vel_regressor = torch.nn.Sequential(
+            torch.nn.Linear(n_embed, n_embed),
+            torch.nn.ReLU(),
+            torch.nn.Linear(n_embed, 1),  # output a scalar
+            torch.nn.Sigmoid()
+        )
+        # Timeshift regressor predicts log-transformed time shift values
+        self.ts_regressor = torch.nn.Sequential(
+            torch.nn.Linear(n_embed, n_embed),
+            torch.nn.ReLU(),
+            torch.nn.Linear(n_embed, 1),  # output a scalar
+        )
+
+    def forward(self, input_ids: torch.Tensor, token_type_ids: torch.Tensor, attention_mask):
+        hidden = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        cls_logits = self.classifier(hidden)
+        vel_reg_preds = self.vel_regressor(hidden).squeeze(-1) * 127  # map from [0,1] to [0, 127]
+        ts_reg_preds = self.ts_regressor(hidden).squeeze(-1)
+        return cls_logits, vel_reg_preds, ts_reg_preds
+
+
+class LitBertMLM(pl.LightningModule):
+    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16, lr=1e-4):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = NanoBertMLM(vocab_size, n_layers, n_heads, dropout, n_embed, max_seq_len)
+        self.lr = lr
+        self.loss_weighting = None
+        self.note_loss = NoteCrossEntropy()
+        self.velocity_loss = VelocityLoss()
+        self.timeshift_loss = TimeshiftLoss()
+
+    def on_fit_start(self) -> None:
+        self.loss_weighting = GradientsLossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0},
+                                                     last_layer=self.model.bert.encoder.get_last_layer_weights(),
+                                                     ema_rate=0.9)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
-        sequence_output = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
-        prediction_scores = self.cls(sequence_output)
+        return self.model(input_ids, token_type_ids, attention_mask, labels)
 
-        loss = None
-        if labels is not None:
-            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL_INDEX)  # TODO @Bmois set label ignore index
-            loss = loss_fct(prediction_scores.view(-1, self.cls[-1].out_features), labels.view(-1))
-        # TODO add loss for regression
+    def training_step(self, batch, batch_idx):
+        input_ids, token_types, attention_mask, labels = batch
+        cls_logits, vel_preds, ts_preds = self(input_ids, token_types, attention_mask, labels)
 
-        return loss, prediction_scores
+        note_loss = self.note_loss(cls_logits, token_types, labels)
+        velocity_loss = self.velocity_loss(vel_preds, token_types, labels)
+        timeshift_loss = self.timeshift_loss(ts_preds, token_types, labels)
+        total_loss = self.loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
+        loss_dict = dict(note=note_loss,
+                         vel=velocity_loss,
+                         ts=timeshift_loss,
+                         loss=total_loss)
+
+        self.log_dict({f"loss/{k}/train": v for k, v in loss_dict.items()}, sync_dist=False)
+
+        return total_loss
+
+    def validation_step(self, batch, batch_idx):
+        input_ids, token_type_ids, attention_mask, labels = batch
+        loss, _ = self(input_ids, token_type_ids, attention_mask, labels)
+        self.log("val_loss", loss)
+
+    def configure_optimizers(self):
+        return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
 def main():
@@ -213,25 +274,36 @@ def main():
 
     # Generate random input data
     input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
-    token_type_ids = torch.randint(0, 2, [batch_size, max_seq_len])
+    token_types = torch.randint(0, 3, [batch_size, max_seq_len])
     attention_mask = torch.ones_like(input_ids)
     labels = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
 
     # Set some labels to ignore index to simulate masked labels
     labels[torch.rand_like(labels, dtype=torch.float) < 0.2] = IGNORE_LABEL_INDEX
+    # TODO @Bmois: assign special mask for different token type: noteon-off, velocity, timeshift
 
     # Perform a forward pass
     model.eval()  # Set model to evaluation mode
     with torch.no_grad():
-        loss, prediction_scores = model(input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
-                                        labels=labels)
+        logits, vel_preds, ts_preds = model(input_ids, token_type_ids=token_types, attention_mask=attention_mask)
 
+    # Compute loss
+    note_loss_fn = NoteCrossEntropy()
+    velocity_loss_fn = VelocityLoss()
+    timeshift_loss_fn = TimeshiftLoss()
+
+    note_loss = note_loss_fn(logits, token_types, labels)
+    timeshift_loss = timeshift_loss_fn(ts_preds, token_types, labels)
+    velocity_loss = velocity_loss_fn(vel_preds, token_types, labels)
+    loss_weighting = LossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0})
+    loss = loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
     # Check output
     print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
-    print(f"Prediction scores shape: {prediction_scores.shape}")
+
+    assert logits.shape == (batch_size, max_seq_len, vocab_size), "Incorrect logits shape"
+    assert vel_preds.shape == (batch_size, max_seq_len), "Incorrect preds shape"
 
     # Assertions to verify correct output
-    assert prediction_scores.shape == (batch_size, max_seq_len, vocab_size), "Incorrect prediction scores shape"
     if loss is not None:
         assert isinstance(loss.item(), float), "Loss is not a float value"
 
