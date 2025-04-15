@@ -8,22 +8,33 @@ from pytorch_lightning import Trainer
 from torch.utils.data import DataLoader
 from src.data.create_dataset import load_dataset
 from src.model.bert import LitBertMLM
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
-# --- Init WandB logger ---
-wandb_logger = WandbLogger(
-    project="nano-bert-mlm",  # give your project a name
-    name="v0.1",  # optional run name
-    log_model="all"  # optionally log model checkpoints as artifacts
-)
+import importlib.util
+
+
+def get_logger():
+    # if importlib.util.find_spec("wandb") is not None:
+    #     try:
+    #         import wandb
+    #         return WandbLogger(
+    #             project="mix-token-bert",
+    #             name="v0.1",
+    #             log_model="all"
+    #         )
+    #     except Exception as e:
+    #         print(f"wandb import failed, falling back to CSV logger. Error: {e}")
+    # print("Using CSV Logger instead of WandB.")
+    return CSVLogger("logs", name="nano-bert-mlm")
+
 
 # --- Model Checkpointing ---
 checkpoint_callback = ModelCheckpoint(
     monitor="val_loss",
     save_top_k=1,
     mode="min",
-    filename="contmidi-bert-{epoch:02d}-{val_loss:.2f}",
+    filename="mix-token-bert-{epoch:02d}-{val_loss:.2f}",
     save_weights_only=True  # or False if you want full model + optimizer
 )
 
@@ -42,11 +53,11 @@ def train(data_dir):
 
     model = LitBertMLM(vocab_size=vocab_size, n_embed=128, max_seq_len=128)
     trainer = Trainer(max_epochs=30, accelerator='mps',
-                      logger=wandb_logger,
+                      logger=get_logger(),
                       callbacks=[checkpoint_callback])
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 
 if __name__ == "__main__":
-    data_dir = ''
+    data_dir = '/Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data'
     train(data_dir)

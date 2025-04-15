@@ -10,7 +10,8 @@ import pytorch_lightning as pl
 
 from src.model.embedding import HybridEmbedding
 from src.model.loss import LossWeighting, GradientsLossWeighting, NoteCrossEntropy, VelocityLoss, TimeshiftLoss
-from src.util.definitions import IGNORE_LABEL_INDEX, NOTE_TYPE, TS_TYPE, VEL_TYPE
+from src.util.definitions import IGNORE_LABEL_INDEX, NOTE_TYPE, TS_TYPE, VEL_TYPE, NOTE_MASK, TIMESHIFT_MASK, \
+    VELOCITY_MASK
 
 
 class BertAttentionHead(torch.nn.Module):
@@ -171,16 +172,7 @@ class NanoBERT(torch.nn.Module):
             token_type_ids = torch.zeros_like(input_ids)
 
         emb_output = self.embedding(input_ids, token_type_ids)
-
-        # mask = (input_ids > 0).unsqueeze(1).repeat(1, input_ids.size(1), 1)
-
-        attention_mask = attention_mask.unsqueeze(1)
-        attention_mask = attention_mask.to(dtype=next(self.parameters()).dtype)
-        attention_mask = attention_mask.repeat(1, input_ids.size(1), 1)
-
-        # encoded = self.encoder(emb_output, mask)
         encoded = self.encoder(emb_output, attention_mask)
-
         pooled = self.pooler(encoded)
         return pooled
 
@@ -218,6 +210,45 @@ class NanoBertMLM(torch.nn.Module):
         return cls_logits, vel_reg_preds, ts_reg_preds
 
 
+def mask_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: dict or None = None,
+               mask_token_ids: dict or None = None):
+    """
+    :param input_ids:
+    :param token_types:
+    :param mask_config: assign mask probabilities
+    :param mask_token_ids:  assign token id for masking
+    :return:
+    """
+    if mask_config is None:
+        mask_config = {
+            'note': 0.15,
+            'velocity': 0.15,
+            'timeshift': 0.15
+        }
+    if mask_token_ids is None:
+        mask_token_ids = {
+            'note':  NOTE_MASK,
+            'timeshift': TIMESHIFT_MASK,
+            'velocity': VELOCITY_MASK,
+        }
+
+    device = input_ids.device
+    labels = input_ids.clone()
+    masked_input = input_ids.clone()
+
+    for type_id, type_name in zip([0, 1, 2], ['note', 'timeshift', 'velocity']):
+        type_mask = (token_types == type_id)
+        prob = mask_config.get(type_name, 0.0)
+        mask_decision = torch.bernoulli(torch.full_like(input_ids, prob, dtype=torch.float, device=device)).bool()
+        mask_mask = type_mask & mask_decision
+
+        masked_input[mask_mask] = mask_token_ids[type_name]
+        labels[~mask_mask & type_mask] = IGNORE_LABEL_INDEX  # Only mask label for unmasked tokens of this type
+
+    labels[~((token_types == 0) | (token_types == 1) | (token_types == 2))] = IGNORE_LABEL_INDEX
+    return masked_input, labels
+
+
 class LitBertMLM(pl.LightningModule):
     def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16, lr=1e-4):
         super().__init__()
@@ -238,7 +269,9 @@ class LitBertMLM(pl.LightningModule):
         return self.model(input_ids, token_type_ids, attention_mask, labels)
 
     def training_step(self, batch, batch_idx):
-        input_ids, token_types, attention_mask, labels = batch
+        # TODO @Bmois write masking mechanism
+        input_ids, attention_mask, token_types = batch
+        labels = input_ids.clone()
         cls_logits, vel_preds, ts_preds = self(input_ids, token_types, attention_mask, labels)
 
         note_loss = self.note_loss(cls_logits, token_types, labels)
@@ -255,7 +288,9 @@ class LitBertMLM(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        input_ids, token_type_ids, attention_mask, labels = batch
+        input_ids, attention_mask, token_type_ids = batch
+        masked_input, labels = mask_input(input_ids, token_type_ids)
+
         loss, _ = self(input_ids, token_type_ids, attention_mask, labels)
         self.log("val_loss", loss)
 

@@ -345,10 +345,15 @@ class MixTokenDataset(Dataset):
         self.samples = torch.load(dpath)
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.samples['input_ids'])
 
     def __getitem__(self, idx):
-        return self.samples[idx]
+        """
+        Return input_ids, masks, types
+        :param idx:
+        :return:
+        """
+        return self.samples['input_ids'][idx], self.samples['masks'][idx], self.samples['types'][idx]
 
 
 def create_dataset(midi_dir, save_dir=None, split_ratios=(0.8, 0.1, 0.1), seed=0,
@@ -363,6 +368,8 @@ def create_dataset(midi_dir, save_dir=None, split_ratios=(0.8, 0.1, 0.1), seed=0
     :param max_seq_len:
     :return:
     """
+    # TODO @Bmois check whether it decodes velocity tokens
+
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -376,9 +383,9 @@ def create_dataset(midi_dir, save_dir=None, split_ratios=(0.8, 0.1, 0.1), seed=0
     n_val = int(split_ratios[1] * total)
 
     splits = {
-        'train': midi_files[:n_train],
         'val': midi_files[n_train:n_train + n_val],
         'test': midi_files[n_train + n_val:],
+        'train': midi_files[:n_train],
     }
 
     config = performance_model.default_configs[config_name]
@@ -391,31 +398,42 @@ def create_dataset(midi_dir, save_dir=None, split_ratios=(0.8, 0.1, 0.1), seed=0
 
     # Process and save
     for split_name, files in splits.items():
-        all_samples = []
+        input_ids_list = []
+        masks_list = []
+        types_list = []
+
         for midi_file in tqdm.tqdm(files, desc=f"Processing {split_name}"):
             try:
                 token_ids, masks, types = create_input_from_midi(midi_file, config, max_seq_len=max_seq_len)
             except Exception as e:
                 print(f"Skipping {midi_file}: {e}")
                 continue
+            input_ids_list.extend(token_ids)
+            masks_list.extend(masks)
+            types_list.extend(types)
+        if input_ids_list:
+            input_ids_tensor = torch.stack(input_ids_list)
+            masks_tensor = torch.stack(masks_list)
+            types_tensor = torch.stack(types_list)
 
-            sample = {
-                'input_ids': token_ids,
-                'masks': masks,
-                'types': types,
+            split_data = {
+                'input_ids': input_ids_tensor,
+                'masks': masks_tensor,
+                'types': types_tensor,
             }
-            all_samples.append(sample)
 
-        data_info[split_name + "_size"] = len(all_samples)
-        out_path = save_dir / f"{split_name}.pt"
-        torch.save(all_samples, out_path)
-        print(f"Saved {split_name} set with {len(all_samples)} samples to {out_path}")
+            data_info[split_name + "_size"] = input_ids_tensor.size(0)
+            out_path = save_dir / f"{split_name}.pt"
+            torch.save(split_data, out_path)
+            print(f"Saved {split_name} set with {input_ids_tensor.size(0)} samples to {out_path}")
+        else:
+            print(f"No valid samples found for {split_name}. Skipping saving.")
 
 
 def load_dataset(data_dir):
-    train_dataset = MixTokenDataset(os.path.join(data_dir, 'train'))
-    val_dataset = MixTokenDataset(os.path.join(data_dir, 'val'))
-    test_dataset = MixTokenDataset(os.path.join(data_dir, 'test'))
+    train_dataset = MixTokenDataset(os.path.join(data_dir, 'train.pt'))
+    val_dataset = MixTokenDataset(os.path.join(data_dir, 'val.pt'))
+    test_dataset = MixTokenDataset(os.path.join(data_dir, 'test.pt'))
 
     return train_dataset, val_dataset, test_dataset
 
@@ -441,7 +459,7 @@ if __name__ == "__main__":
     ''''''
     data_path = '/Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro-v3.0.0'
     save_path = '/Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data'
-    create_dataset(data_path, save_dir=save_path)
+    create_dataset(data_path, save_dir=save_path, config_name='performance_with_dynamics')
     # ftest_create_input()
     # ftest_merge_timeshifts()
     # ftest_decode_ids()
