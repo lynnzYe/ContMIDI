@@ -13,6 +13,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 import importlib.util
 
+from src.model.loss import GradientsLossWeighting
+
 
 def get_logger():
     # if importlib.util.find_spec("wandb") is not None:
@@ -37,6 +39,8 @@ checkpoint_callback = ModelCheckpoint(
     filename="mix-token-bert-{epoch:02d}-{val_loss:.2f}",
     save_weights_only=True  # or False if you want full model + optimizer
 )
+loss_weighting = GradientsLossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0},
+                                        ema_rate=0.9)
 
 
 def train(data_dir):
@@ -47,14 +51,15 @@ def train(data_dir):
 
     train_data, val_data, test_data = load_dataset(data_dir)
 
-    train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=32)
-    test_loader = DataLoader(test_data, batch_size=32)
+    train_loader = DataLoader(train_data, batch_size=32, shuffle=True, num_workers=6)
+    val_loader = DataLoader(val_data, batch_size=32, num_workers=2)
+    # test_loader = DataLoader(test_data, batch_size=32, num_workers=2)
 
-    model = LitBertMLM(vocab_size=vocab_size, n_embed=128, max_seq_len=128)
-    trainer = Trainer(max_epochs=30, accelerator='mps',
+    model = LitBertMLM(vocab_size=vocab_size, n_layers=6, n_heads=4, n_embed=512, max_seq_len=128)
+
+    trainer = Trainer(max_epochs=30, accelerator='cpu',
                       logger=get_logger(),
-                      callbacks=[checkpoint_callback])
+                      callbacks=[checkpoint_callback, loss_weighting])
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 

@@ -46,8 +46,8 @@ class VelocityLoss(nn.Module):
 
         valid_pred_mask = (velocity_targets != IGNORE_LABEL_INDEX)
         velocity_preds = velocity_preds[valid_pred_mask]
-        velocity_targets = velocity_targets[valid_pred_mask]
-        return self.criterion(velocity_preds, velocity_targets)
+        velocity_targets = velocity_targets[valid_pred_mask]  # Divide by 127 to avoid big loss
+        return self.criterion(velocity_preds, velocity_targets / 127)  # pred in range [0, 1] after sigmoid
 
 
 class TimeshiftLoss(nn.Module):

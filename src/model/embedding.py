@@ -57,8 +57,11 @@ class HybridEmbedding(nn.Module):
         # --- Discrete tokens ---
         discrete_mask = (token_types == NOTE_TYPE)  # (B, T)
         if discrete_mask.any():
-            discrete_emb = self.discrete_layer_norm(self.token_embedding(input_ids))
-            embeddings[discrete_mask] = discrete_emb[discrete_mask]
+            # Only select the discrete token IDs
+            discrete_ids = input_ids[discrete_mask]
+            discrete_emb = self.token_embedding(discrete_ids)
+            discrete_emb = self.discrete_layer_norm(discrete_emb)
+            embeddings[discrete_mask] = discrete_emb
 
         # --- Continuous values ---
         timeshift_mask = (token_types == TS_TYPE)

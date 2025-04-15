@@ -342,7 +342,7 @@ def collect_files(data_dir, key=None, negative_key=None):
 
 class MixTokenDataset(Dataset):
     def __init__(self, dpath: str):
-        self.samples = torch.load(dpath)
+        self.samples = torch.load(dpath, weights_only=True)
 
     def __len__(self):
         return len(self.samples['input_ids'])
