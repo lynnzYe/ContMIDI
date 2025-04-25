@@ -6,7 +6,7 @@ Brief: embed both discrete and continuous tokens
 import torch
 import torch.nn as nn
 
-from src.util.definitions import TS_TYPE, VEL_TYPE, NOTE_TYPE
+from src.util.definitions import TS_TYPE, VEL_TYPE, NOTE_TYPE, TIMESHIFT_MASK, VELOCITY_MASK
 
 
 def timeshift_fe(t):
@@ -33,10 +33,12 @@ def velocity_fe(v):
 class HybridEmbedding(nn.Module):
     def __init__(self, discrete_vocab_size, embed_dim, max_len):
         super().__init__()
+        self.embed_dim = embed_dim
         self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
         self.timeshift_embedding = nn.Sequential(
             nn.Linear(4, embed_dim),  # four extracted features
-            nn.ReLU())
+            nn.ReLU()
+        )
         self.velocity_embedding = nn.Sequential(
             nn.Linear(4, embed_dim),
             nn.ReLU())
@@ -51,7 +53,28 @@ class HybridEmbedding(nn.Module):
         token_types: tensor of shape (batch, seq_len), values are 'discrete' or 'continuous'
         """
         B, T = input_ids.shape
+        D = self.token_embedding.embedding_dim
         device = input_ids.device
+
+        def embed_cont_tokens(masked_vals: torch.Tensor, feat_extr_func, embed_func, layer_norm, mask_id):
+            N = masked_vals.size(0)
+            real_input_pos = masked_vals >= 0
+            cont_embedding = torch.zeros(N, D, dtype=torch.float,
+                                         device=device)  # placeholder
+            if real_input_pos.any():
+                real_vals = masked_vals[real_input_pos].float()
+                real_feats = feat_extr_func(real_vals)  # → (N_real, feat_dim)
+                real_emb = embed_func(real_feats)
+                real_emb = layer_norm(real_emb)
+                cont_embedding[real_input_pos] = real_emb
+            if (~real_input_pos).any():
+                mask_pos = (~real_input_pos).nonzero(as_tuple=False).squeeze(-1)
+                # Look up mask vector
+                mask_emb = self.token_embedding(torch.full(
+                    (mask_pos.size(0),), mask_id, dtype=torch.long, device=device
+                ))
+                cont_embedding[mask_pos] = mask_emb
+            return cont_embedding
 
         embeddings = torch.zeros(B, T, self.token_embedding.embedding_dim, device=device)
         # --- Discrete tokens ---
@@ -66,18 +89,24 @@ class HybridEmbedding(nn.Module):
         # --- Continuous values ---
         timeshift_mask = (token_types == TS_TYPE)
         if timeshift_mask.any():
-            ts_feat = timeshift_fe(input_ids[timeshift_mask].float())
-            embeddings[timeshift_mask] = self.timeshift_layer_norm(self.timeshift_embedding(ts_feat))
+            embeddings[timeshift_mask] = embed_cont_tokens(masked_vals=input_ids[timeshift_mask],
+                                                           feat_extr_func=timeshift_fe,
+                                                           embed_func=self.timeshift_embedding,
+                                                           layer_norm=self.timeshift_layer_norm,
+                                                           mask_id=-TIMESHIFT_MASK)
 
         velocity_mask = (token_types == VEL_TYPE)
         if velocity_mask.any():
-            vel_feat = velocity_fe(input_ids[velocity_mask].float())
-            embeddings[velocity_mask] = self.velocity_layer_norm(self.velocity_embedding(vel_feat))
+            embeddings[velocity_mask] = embed_cont_tokens(masked_vals=input_ids[velocity_mask],
+                                                          feat_extr_func=velocity_fe,
+                                                          embed_func=self.velocity_embedding,
+                                                          layer_norm=self.velocity_layer_norm,
+                                                          mask_id=-VELOCITY_MASK
+                                                          )
 
         # --- Add position embedding ---
         pos_ids = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
         embeddings += self.position_embedding(pos_ids)
-
         return embeddings
 
 

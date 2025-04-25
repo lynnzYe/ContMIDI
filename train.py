@@ -17,16 +17,16 @@ from src.model.loss import GradientsLossWeighting
 
 
 def get_logger(cfg):
-    # if cfg.logger == 'wandb':
-    #     try:
-    #         import wandb
-    #         return WandbLogger(
-    #             project=cfg.project_name,
-    #             name=cfg.run_name,
-    #             log_model=cfg.log_model
-    #         )
-    #     except Exception as e:
-    #         print(f"wandb import failed, falling back to CSV logger. Error: {e}")
+    if cfg.logger == 'wandb':
+        try:
+            import wandb
+            return WandbLogger(
+                project=cfg.project_name,
+                name=cfg.run_name,
+                log_model=cfg.log_model
+            )
+        except Exception as e:
+            print(f"wandb import failed, falling back to CSV logger. Error: {e}")
     print("Using CSV Logger instead of WandB.")
     return CSVLogger("logs", name=cfg.project_name)
 

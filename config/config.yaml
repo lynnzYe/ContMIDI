@@ -1,5 +1,5 @@
 defaults:
-  - model: test
+  - model: default
   - training: default
   - checkpoint: default
   - loss_weighting: default

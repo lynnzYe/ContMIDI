@@ -2,6 +2,7 @@ tmp
 wandb
 logs
 mix-token-bert
+outputs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
