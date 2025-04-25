@@ -17,18 +17,18 @@ from src.model.loss import GradientsLossWeighting
 
 
 def get_logger():
-    # if importlib.util.find_spec("wandb") is not None:
-    #     try:
-    #         import wandb
-    #         return WandbLogger(
-    #             project="mix-token-bert",
-    #             name="v0.1",
-    #             log_model="all"
-    #         )
-    #     except Exception as e:
-    #         print(f"wandb import failed, falling back to CSV logger. Error: {e}")
-    # print("Using CSV Logger instead of WandB.")
-    return CSVLogger("logs", name="nano-bert-mlm")
+    if importlib.util.find_spec("wandb") is not None:
+        try:
+            import wandb
+            return WandbLogger(
+                project="mix-token-bert",
+                name="v0.1",
+                log_model="all"
+            )
+        except Exception as e:
+            print(f"wandb import failed, falling back to CSV logger. Error: {e}")
+    print("Using CSV Logger instead of WandB.")
+    return CSVLogger("logs", name="mix-token-bert")
 
 
 # --- Model Checkpointing ---
@@ -37,7 +37,7 @@ checkpoint_callback = ModelCheckpoint(
     save_top_k=1,
     mode="min",
     filename="mix-token-bert-{epoch:02d}-{val_loss:.2f}",
-    save_weights_only=True  # or False if you want full model + optimizer
+    save_weights_only=False
 )
 loss_weighting = GradientsLossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0},
                                         ema_rate=0.9)
@@ -55,12 +55,14 @@ def train(data_dir):
     val_loader = DataLoader(val_data, batch_size=32, num_workers=2)
     # test_loader = DataLoader(test_data, batch_size=32, num_workers=2)
 
-    model = LitBertMLM(vocab_size=vocab_size, n_layers=6, n_heads=4, n_embed=512, max_seq_len=128)
+    model = LitBertMLM(vocab_size=vocab_size, n_layers=6, n_heads=4, n_embed=512, max_seq_len=max_seq_len)
 
-    trainer = Trainer(max_epochs=30, accelerator='cpu',
+    trainer = Trainer(max_epochs=20, accelerator='mps',
                       logger=get_logger(),
                       callbacks=[checkpoint_callback, loss_weighting])
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(model,
+                train_dataloaders=train_loader, val_dataloaders=val_loader,
+                ckpt_path='/Users/kurono/Documents/github/ContinuousMIDI/mix-token-bert/of082pyg/checkpoints/mix-token-bert-epoch=02-val_loss=0.00.ckpt')
 
 
 if __name__ == "__main__":

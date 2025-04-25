@@ -327,6 +327,7 @@ class LitBertMLM(pl.LightningModule):
                          loss=total_loss)
 
         self.log_dict({f"loss/{k}/train": v for k, v in loss_dict.items()}, sync_dist=False)
+        self.log("val_loss", total_loss, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.parameters(), lr=self.lr)
