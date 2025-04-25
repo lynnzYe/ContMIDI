@@ -368,8 +368,6 @@ def create_dataset(midi_dir, save_dir=None, split_ratios=(0.8, 0.1, 0.1), seed=0
     :param max_seq_len:
     :return:
     """
-    # TODO @Bmois check whether it decodes velocity tokens
-
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 

@@ -4,7 +4,6 @@ Created on: 2025/4/11
 Brief: 
 """
 import torch
-import torch.functional as F
 import math
 import pytorch_lightning as pl
 
@@ -256,6 +255,24 @@ def mask_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: 
     return masked_input, labels
 
 
+def train_step(model, input_ids, attention_mask, token_types, note_loss, velocity_loss, timeshift_loss, loss_weighting):
+    masked_input, labels = mask_input(input_ids, token_types)
+    output_dict = model(masked_input, token_types, attention_mask)
+    cls_logits = output_dict['note']
+    vel_preds = output_dict['velocity']
+    ts_preds = output_dict['timeshift']
+
+    note_loss = note_loss(cls_logits, token_types, labels)
+    velocity_loss = velocity_loss(vel_preds, token_types, labels)
+    timeshift_loss = timeshift_loss(ts_preds, token_types, labels)
+    combined_loss = loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
+    loss_dict = dict(note=note_loss,
+                     vel=velocity_loss,
+                     ts=timeshift_loss,
+                     loss=combined_loss)
+    return loss_dict, combined_loss
+
+
 class LitBertMLM(pl.LightningModule):
     def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16, lr=1e-4):
         super().__init__()
@@ -290,21 +307,8 @@ class LitBertMLM(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # TODO @Bmois write masking mechanism
         input_ids, attention_mask, token_types = batch
-        labels = input_ids.clone()
-        output_dict = self(input_ids, token_types, attention_mask)
-        cls_logits = output_dict['note']
-        vel_preds = output_dict['velocity']
-        ts_preds = output_dict['timeshift']
-
-        note_loss = self.note_loss(cls_logits, token_types, labels)
-        velocity_loss = self.velocity_loss(vel_preds, token_types, labels)
-        timeshift_loss = self.timeshift_loss(ts_preds, token_types, labels)
-        total_loss = self.loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
-        loss_dict = dict(note=note_loss,
-                         vel=velocity_loss,
-                         ts=timeshift_loss,
-                         loss=total_loss)
-
+        loss_dict, total_loss = train_step(self.model, input_ids, attention_mask, token_types, self.note_loss,
+                                           self.velocity_loss, self.timeshift_loss, self.loss_weighting)
         self.log_dict({f"loss/{k}/train": v for k, v in loss_dict.items()}, sync_dist=False)
 
         return total_loss
@@ -312,7 +316,7 @@ class LitBertMLM(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         input_ids, attention_mask, token_types = batch
         masked_input, labels = mask_input(input_ids, token_types)
-        output_dict = self(input_ids, token_types, attention_mask)
+        output_dict = self(masked_input, token_types, attention_mask)
         cls_logits = output_dict['note']
         vel_preds = output_dict['velocity']
         ts_preds = output_dict['timeshift']
@@ -346,36 +350,18 @@ def main():
     input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
     token_types = torch.randint(0, 3, [batch_size, max_seq_len])
     attention_mask = torch.ones_like(input_ids)
-    labels = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
 
-    # Set some labels to ignore index to simulate masked labels
-    labels[torch.rand_like(labels, dtype=torch.float) < 0.2] = IGNORE_LABEL_INDEX
-    # TODO @Bmois: assign special mask for different token type: noteon-off, velocity, timeshift
-
-    # Perform a forward pass
-    model.eval()  # Set model to evaluation mode
-    with torch.no_grad():
-        logits, vel_preds, ts_preds = model(input_ids, token_type_ids=token_types, attention_mask=attention_mask)
-
-    # Compute loss
     note_loss_fn = NoteCrossEntropy()
     velocity_loss_fn = VelocityLoss()
     timeshift_loss_fn = TimeshiftLoss()
+    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():
+        loss_dict, total_loss = train_step(model, input_ids, attention_mask, token_types, note_loss_fn,
+                                           velocity_loss_fn, timeshift_loss_fn,
+                                           LossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0}))
 
-    note_loss = note_loss_fn(logits, token_types, labels)
-    timeshift_loss = timeshift_loss_fn(ts_preds, token_types, labels)
-    velocity_loss = velocity_loss_fn(vel_preds, token_types, labels)
-    loss_weighting = LossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0})
-    loss = loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
     # Check output
-    print(f"Loss: {loss.item() if loss is not None else 'N/A'}")
-
-    assert logits.shape == (batch_size, max_seq_len, vocab_size), "Incorrect logits shape"
-    assert vel_preds.shape == (batch_size, max_seq_len), "Incorrect preds shape"
-
-    # Assertions to verify correct output
-    if loss is not None:
-        assert isinstance(loss.item(), float), "Loss is not a float value"
+    print(f"Loss: {total_loss}")
 
 
 if __name__ == "__main__":

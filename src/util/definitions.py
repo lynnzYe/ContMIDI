@@ -14,5 +14,5 @@ DUM_TYPE = -1
 
 # Since piano has pitch range 21-108, 0~20 are unused and can therefore be used as mask tokens
 NOTE_MASK = 0
-TIMESHIFT_MASK = 1
-VELOCITY_MASK = 2
+TIMESHIFT_MASK = -1 #
+VELOCITY_MASK = -2

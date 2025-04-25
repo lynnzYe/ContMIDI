@@ -1,0 +1,6 @@
+batch_size: 32
+num_workers_train: 6
+num_workers_val: 2
+max_epochs: 20
+accelerator: mps
+ckpt_path: null

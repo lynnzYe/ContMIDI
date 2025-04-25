@@ -1,0 +1,11 @@
+defaults:
+  - model: test
+  - training: default
+  - checkpoint: default
+  - loss_weighting: default
+
+project_name: mix-token-bert
+run_name: v0.1
+log_model: all
+logger: wandb
+data_dir: /Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data
