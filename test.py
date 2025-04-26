@@ -10,12 +10,12 @@ from src.model.bert import mask_input
 from src.util.metrics import hits_at_k, accuracy_within_n
 
 
-def test_mlm(model, perf_config, test_dataloader, metrics=None, device=torch.device('mps')):
+def test_mlm(model, test_dataloader, note_loss_fn, timeshift_loss_fn, velocity_loss_fn, loss_weighting_fn,
+             metrics=None):
     if metrics is None:
         metrics = [hits_at_k, accuracy_within_n]
 
     test_metrics = {metric.__name__: [] for metric in metrics}
-    tokenizer = perf_config.encoder_decoder
     model.eval()
     total_loss = 0
     count = 0
@@ -28,16 +28,15 @@ def test_mlm(model, perf_config, test_dataloader, metrics=None, device=torch.dev
             cls_logits = output_dict['note']
             vel_preds = output_dict['velocity']
             ts_preds = output_dict['timeshift']
-            # Mask tokens
-            inputs, labels, mask_type_tensor = mask_perf_tokens(input_ids, perf_config=perf_config, mask_prob=0.15,
-                                                                # normal_mask_ratio=.3,
-                                                                special_ids=(note_seq.PerformanceEvent.VELOCITY,))
-            inputs = inputs.to(device)
-            attention_mask = attention_mask.to(device)
-            labels = labels.to(device)
 
-            loss, logits = model(inputs, attention_mask=attention_mask, labels=labels)
-            total_loss += loss.item()
+            note_loss = note_loss_fn(cls_logits, token_types, labels)
+            velocity_loss = velocity_loss_fn(vel_preds, token_types, labels)
+            timeshift_loss = timeshift_loss_fn(ts_preds, token_types, labels)
+
+            # Calculate the total loss
+            weighted_loss = loss_weighting_fn(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
+
+            total_loss += weighted_loss
             count += 1
 
             # Calculate and store each metric

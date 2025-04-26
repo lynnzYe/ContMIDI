@@ -6,80 +6,132 @@ Brief:
 import torch
 import functools
 
-
-def cross_entropy_loss(logits, labels, masks=None, consider_mask=None):
-    if masks is None:
-        raise ValueError("Masks are needed to evaluate MLM, else all tokens will be considered!")
-    if consider_mask is None:
-        valid_mask = torch.greater(masks, 0)
-    else:
-        assert isinstance(consider_mask, torch.Tensor)
-        valid_mask = torch.isin(masks, consider_mask)
-
-    valid_logits = logits[valid_mask]
-    valid_labels = labels[valid_mask]
-    if valid_logits.numel() == 0:
-        return 0  # No valid elements to calculate loss
-    loss_fn = torch.nn.CrossEntropyLoss()
-    return loss_fn(valid_logits.view(-1, valid_logits.size(-1)), valid_labels.view(-1)).item()
+from src.util.definitions import IGNORE_LABEL_INDEX, NOTE_TYPE, TS_TYPE
 
 
-def hits_at_k(logits, labels, k=3, masks=None, consider_mask=None):
+def obtain_target_input(all_logits: torch.Tensor, token_types: torch.Tensor, labels: torch.Tensor, tgt_type):
+    # Mask out the continuous tokens
+    note_mask = (token_types != tgt_type)
+    if not note_mask.any():
+        return torch.tensor(0.0, device=all_logits.device)
+    logits = all_logits[note_mask]
+    labels = labels[note_mask]
+
+    # Consider only masked input (label != IGNORE_LABEL_INDEX)
+    valid_mask = (labels != IGNORE_LABEL_INDEX)
+    logits = logits[valid_mask]
+    labels = labels[valid_mask]
+    return logits, labels
+
+
+def discrete_metric_template(all_logits: torch.Tensor, token_types: torch.Tensor, labels: torch.Tensor):
     """
-    HITS@K metric
-    :param logits:
-    :param labels:
-    :param k:
-    :param masks:
-    :param consider_mask:
+    Metric template for discrete token classification
+    :param all_logits: mixed token types (both discrete tokens & continuous tokens, the direct model output)
+    :param token_types:
+    :param labels: input ids (ignore label for all unmasked input)
     :return:
     """
-    if masks is None:
-        raise ValueError("Masks are needed to evaluate MLM, else all tokens will be considered!")
-    if consider_mask is None:
-        valid_mask = torch.greater(masks, 0)
-    else:
-        assert isinstance(consider_mask, torch.Tensor)
-        valid_mask = torch.isin(masks, consider_mask)
+    # Mask out the continuous tokens
+    logits, labels = obtain_target_input(all_logits, token_types, labels, tgt_type=NOTE_TYPE)
 
-    valid_logits = logits[valid_mask]
-    valid_labels = labels[valid_mask]
-
-    if valid_labels.numel() == 0:
+    # Calculate the metric
+    if logits.numel() == 0:
         return float('nan')
+    valid_pred = logits.argmax(dim=-1)
+    acc = (valid_pred == labels).float().mean().item()
+    return acc
 
-    _, valid_topk_indices = torch.topk(valid_logits, k, dim=-1)
+
+def continuous_metric_template(all_preds, token_types, labels, tgt_type=TS_TYPE):
+    """
+    Metric template for regressions
+    :param all_preds: numeric values (regression output)
+    :param token_types:
+    :param labels: input ids (ignore label for all unmasked input)
+    :param tgt_type: which type of continuous token?
+    :return:
+    """
+    preds, labels = obtain_target_input(all_preds, token_types, labels, tgt_type=tgt_type)
+
+    # Calculate the metric (we use L1 loss for regression)
+    if preds.numel() == 0:
+        return float('nan')
+    acc = (torch.abs(preds - labels) <= 1).float().mean().item()
+    return acc
+
+
+def hits_at_k(all_logits: torch.Tensor, token_types: torch.Tensor, labels: torch.Tensor, top_k=3):
+    """
+    Metric template for discrete token classification
+    :param all_logits: mixed token types (both discrete tokens & continuous tokens, the direct model output)
+    :param token_types:
+    :param labels: input ids (ignore label for all unmasked input)
+    :param top_k:
+    :return:
+    """
+    logits, labels = obtain_target_input(all_logits, token_types, labels, tgt_type=NOTE_TYPE)
+
+    _, valid_topk_indices = torch.topk(logits, top_k, dim=-1)
     # .mean() effectively calculates the binary hit/miss values
-    hits = (valid_topk_indices == valid_labels.unsqueeze(-1)).any(dim=-1).float().mean().item()
+    hits = (valid_topk_indices == logits.unsqueeze(-1)).any(dim=-1).float().mean().item()
     return hits
 
 
-def accuracy_within_n(logits, labels, n=1, masks=None, consider_mask=None):
+def accuracy_within_n(all_logits: torch.Tensor, token_types: torch.Tensor, labels: torch.Tensor, wt_n=2):
     """
-    Calculate accuracy ± n for ordinal classification
-    :param logits:
-    :param labels:
-    :param n:
-    :param masks:
-    :param consider_mask:
+    Metric template for discrete token ordinal classification (assumes classes are arranged in increasing continuous order)
+    :param all_logits: mixed token types (both discrete tokens & continuous tokens, the direct model output)
+    :param token_types:
+    :param labels: input ids (ignore label for all unmasked input)
+    :param wt_n: within n classes (important in ordinal classification)
     :return:
     """
-    if masks is None:
-        raise ValueError("Masks are needed to evaluate MLM, else all tokens will be considered!")
-    if consider_mask is None:
-        valid_mask = torch.greater(masks, 0)
-    else:
-        assert isinstance(consider_mask, torch.Tensor)
-        valid_mask = torch.isin(masks, consider_mask)
+    logits, labels = obtain_target_input(all_logits, token_types, labels, tgt_type=NOTE_TYPE)
 
-    valid_logits = logits[valid_mask]
-    valid_labels = labels[valid_mask]
-
-    if valid_labels.numel() == 0:
+    if logits.numel() == 0:
         return float('nan')
-    valid_pred = valid_logits.argmax(dim=-1)
-    acc = (torch.abs(valid_pred - valid_labels) <= n).float().mean().item()
+    valid_pred = logits.argmax(dim=-1)
+    acc = (torch.abs(valid_pred - labels) <= wt_n).float().mean().item()
     return acc
+
+
+def l1_loss(all_preds, token_types, labels, tgt_type=TS_TYPE):
+    """
+    L1 loss for continuous predictions
+    :param all_preds: numeric values (regression output)
+    :param token_types:
+    :param labels: input ids (ignore label for all unmasked input)
+    :param tgt_type: which type of continuous token?
+    :return:
+    """
+    preds, labels = obtain_target_input(all_preds, token_types, labels, tgt_type=tgt_type)
+
+    # Calculate the metric (we use L1 loss for regression)
+    if preds.numel() == 0:
+        return float('nan')
+    acc = torch.abs(preds - labels).mean().item()
+    return acc
+
+
+def percent_loss(all_preds, token_types, labels, token_type=TS_TYPE):
+    """
+    Deviance from gt represented as percent of GT (+ for overestimation, - for underestimation)
+    The closer to 0 the better
+    :param all_preds:
+    :param token_types:
+    :param labels:
+    :param token_type:
+    :return:
+    """
+    preds, labels = obtain_target_input(all_preds, token_types, labels, tgt_type=token_type)
+
+    # Calculate the metric (we use L1 loss for regression)
+    if preds.numel() == 0:
+        return float('nan')
+    acc = (preds - labels) / labels
+    acc[labels == 0] = 0
+    return acc.mean().item(), torch.std(acc).item()
 
 
 def bind_metric(func, **kwargs):
@@ -90,18 +142,8 @@ def bind_metric(func, **kwargs):
 
 
 def get_mlm_metrics(model_config_path):
-    hits_1_all, hits_2_all, hits_3_all = (bind_metric(hits_at_k, k=1, consider_mask=torch.tensor([1, 2])),
-                                          bind_metric(hits_at_k, k=2, consider_mask=torch.tensor([1, 2])),
-                                          bind_metric(hits_at_k, k=3, consider_mask=torch.tensor([1, 2])))
-    hits_1, hits_2, hits_3 = (bind_metric(hits_at_k, k=1, consider_mask=torch.tensor([1])),
-                              bind_metric(hits_at_k, k=2, consider_mask=torch.tensor([1])),
-                              bind_metric(hits_at_k, k=3, consider_mask=torch.tensor([1])))
-    acc_w_1_all, acc_w_2_all, acc_w_3_all = (bind_metric(accuracy_within_n, n=1, consider_mask=torch.tensor([1, 2])),
-                                             bind_metric(accuracy_within_n, n=2, consider_mask=torch.tensor([1, 2])),
-                                             bind_metric(accuracy_within_n, n=3, consider_mask=torch.tensor([1, 2])))
-    acc_w_1, acc_w_2, acc_w_3 = (bind_metric(accuracy_within_n, n=1, consider_mask=torch.tensor([1])),
-                                 bind_metric(accuracy_within_n, n=2, consider_mask=torch.tensor([1])),
-                                 bind_metric(accuracy_within_n, n=3, consider_mask=torch.tensor([1])))
+    hits_1_all, hits_2_all, hits_3_all = (bind_metric(hits_at_k, top_k=1),
+                                          bind_metric(hits_at_k, top_k=2),
+                                          bind_metric(hits_at_k, top_k=3))
 
-    return [hits_1, hits_2, hits_3, hits_1_all, hits_2_all, hits_3_all, acc_w_1, acc_w_2, acc_w_3, acc_w_1_all,
-            acc_w_2_all, acc_w_3_all]
+    return [hits_1_all, hits_2_all, hits_3_all]
