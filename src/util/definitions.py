@@ -4,6 +4,8 @@ Created on: 2025/4/13
 Brief: 
 """
 
+NDEBUG = False
+
 IGNORE_LABEL_INDEX = -100
 
 # Token types

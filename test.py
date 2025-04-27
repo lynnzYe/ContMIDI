@@ -7,11 +7,13 @@ import torch
 import math
 
 from src.model.bert import mask_input
+from src.util.definitions import NDEBUG
 from src.util.metrics import hits_at_k, accuracy_within_n
+from src.util.magenta.models.performance_rnn import performance_model
 
 
 def test_mlm(model, test_dataloader, note_loss_fn, timeshift_loss_fn, velocity_loss_fn, loss_weighting_fn,
-             metrics=None):
+             metrics=None, config_name='performance_with_dynamics'):
     if metrics is None:
         metrics = [hits_at_k, accuracy_within_n]
 
@@ -19,6 +21,9 @@ def test_mlm(model, test_dataloader, note_loss_fn, timeshift_loss_fn, velocity_l
     model.eval()
     total_loss = 0
     count = 0
+
+    token_config = performance_model.default_configs[config_name]
+    tokenizer = token_config.encoder_decoder
 
     with torch.no_grad():
         for step, batch in enumerate(test_dataloader):
@@ -41,16 +46,12 @@ def test_mlm(model, test_dataloader, note_loss_fn, timeshift_loss_fn, velocity_l
 
             # Calculate and store each metric
             for metric in metrics:
-                metric_value = metric(logits, labels, masks=mask_type_tensor)
+                metric_value = metric(cls_logits, token_types, labels)
                 if not math.isnan(metric_value):
                     test_metrics[metric.__name__].append(metric_value)
 
             # if step == len(test_dataloader) - 1 or not NDEBUG:
-            #     decoded = [tokenizer.class_index_to_event(i, None) for i in inputs[0, :].tolist()]
-            #     print("Input ids:")
-            #     print_perf_seq(decoded)
-            #     print("Decoded:")
-            #     print_perf_seq(decode_batch_perf_logits(logits, tokenizer._one_hot_encoding, idx=0))
+            # TODO @Bmois add decode function (return tokens, and tokens to MIDI func)
 
             if not NDEBUG:
                 break
@@ -65,6 +66,9 @@ def test_mlm(model, test_dataloader, note_loss_fn, timeshift_loss_fn, velocity_l
 
     # Save the checkpoint
     return avg_test_loss, avg_test_metrics
+
+
+# TODO @Bmois add interactive demo (given a MIDI file, generate a new one)
 
 
 def main():

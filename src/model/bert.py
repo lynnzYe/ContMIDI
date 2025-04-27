@@ -242,6 +242,7 @@ def mask_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: 
     labels = input_ids.clone()
     masked_input = input_ids.clone()
 
+    # TODO @Bmois you did not add 10% keep 10% random walk....
     for type_id, type_name in zip([0, 1, 2], ['note', 'timeshift', 'velocity']):
         type_mask = (token_types == type_id)
         prob = mask_config.get(type_name, 0.0)
@@ -305,7 +306,6 @@ class LitBertMLM(pl.LightningModule):
         return self.model(input_ids=input_ids, token_types=token_types, attention_mask=attention_mask)
 
     def training_step(self, batch, batch_idx):
-        # TODO @Bmois write masking mechanism
         input_ids, attention_mask, token_types = batch
         loss_dict, total_loss = train_step(self.model, input_ids, attention_mask, token_types, self.note_loss,
                                            self.velocity_loss, self.timeshift_loss, self.loss_weighting)
