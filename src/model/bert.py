@@ -343,7 +343,8 @@ class LitBertMLM(pl.LightningModule):
 
     def configure_optimizers(self):
         ts_params = list(self.model.ts_regressor.parameters())
-        base_params = [p for p in self.parameters() if p not in ts_params]
+        ts_param_ids = set(id(p) for p in ts_params)
+        base_params = [p for p in self.parameters() if id(p) not in ts_param_ids]
 
         return torch.optim.AdamW([{'params': base_params, 'lr': self.lr},
                                   {'params': ts_params, 'lr': self.lr * 5}])
