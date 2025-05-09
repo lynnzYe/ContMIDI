@@ -67,7 +67,8 @@ class HybridEmbedding(nn.Module):
         self.embed_dim = embed_dim
         self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
 
-        self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim))
+        self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim,
+                                                                                 device=self.token_embedding.weight.device))
 
         self.timeshift_fe = TimeShiftFE(num_bands=num_bands)
         self.velocity_fe = VelocityFE()
