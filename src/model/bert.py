@@ -193,14 +193,22 @@ class NanoBertMLM(torch.nn.Module):
         # Predicts value [0, 1]
         self.vel_regressor = torch.nn.Sequential(
             torch.nn.Linear(n_embed, n_embed),
-            torch.nn.ReLU(),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(n_embed, n_embed),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
             torch.nn.Linear(n_embed, 1),  # output a scalar
             torch.nn.Sigmoid()
         )
         # Timeshift regressor predicts log-transformed time shift values
         self.ts_regressor = torch.nn.Sequential(
             torch.nn.Linear(n_embed, n_embed),
-            torch.nn.ReLU(),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+            torch.nn.Linear(n_embed, n_embed),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
             torch.nn.Linear(n_embed, 1),  # output a scalar
         )
 
@@ -275,7 +283,7 @@ def train_step(model, input_ids, attention_mask, token_types, note_loss, velocit
 
 
 class LitBertMLM(pl.LightningModule):
-    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16, lr=1e-4):
+    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16, lr=1e-5):
         super().__init__()
         self.save_hyperparameters()
         self.model = NanoBertMLM(vocab_size, n_layers, n_heads, dropout, n_embed, max_seq_len)
@@ -334,7 +342,11 @@ class LitBertMLM(pl.LightningModule):
         self.log("val_loss", total_loss, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.parameters(), lr=self.lr)
+        ts_params = list(self.model.ts_regressor.parameters())
+        base_params = [p for p in self.parameters() if p not in ts_params]
+
+        return torch.optim.AdamW([{'params': base_params, 'lr': self.lr},
+                                  {'params': ts_params, 'lr': self.lr * 5}])
 
 
 def main():

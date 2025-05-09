@@ -5,7 +5,7 @@ Brief:
 """
 import torch
 import hydra
-from omegaconf import OmegaConf, DictConfig
+from omegaconf import DictConfig
 from pytorch_lightning import Trainer
 from torch.utils.data import DataLoader
 from src.data.create_dataset import load_dataset
@@ -45,7 +45,8 @@ def train(cfg: DictConfig):
     # test_loader = DataLoader(test_data, batch_size=32, num_workers=2)
 
     model = LitBertMLM(vocab_size=vocab_size, n_layers=cfg.model.n_layers, n_heads=cfg.model.n_heads,
-                       n_embed=cfg.model.n_embed, max_seq_len=max_seq_len)
+                       n_embed=cfg.model.n_embed, max_seq_len=max_seq_len, dropout=cfg.model.dropout,
+                       lr=cfg.training.lr)
 
     checkpoint_callback = ModelCheckpoint(
         monitor=cfg.checkpoint.monitor,

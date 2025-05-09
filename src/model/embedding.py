@@ -5,43 +5,84 @@ Brief: embed both discrete and continuous tokens
 """
 import torch
 import torch.nn as nn
+import math
 
 from src.util.definitions import TS_TYPE, VEL_TYPE, NOTE_TYPE, TIMESHIFT_MASK, VELOCITY_MASK
 
 
-def timeshift_fe(t):
-    """
-    Feature extraction for timeshift value
-    :param t:
-    :return:
-    """
-    t = torch.clamp(t, min=1e-3)
-    return torch.stack([t, torch.log(t), t ** 2, t ** 0.5], dim=-1)
+class TimeShiftFE(nn.Module):
+    def __init__(self, num_bands=4):
+        super().__init__()
+        self.num_bands = num_bands
+        self.ln = nn.LayerNorm(4)
+
+    def fourier_feats(self, t):
+        # Fourier features:
+        freqs = 2 ** torch.arange(self.num_bands, device=t.device) * torch.pi
+        t_proj = t[:, None] * freqs[None, :]  # (N_real, num_bands)
+        return torch.cat([torch.sin(t_proj), torch.cos(t_proj)], dim=-1)
+
+    def forward(self, t):
+        """
+        Feature extraction for timeshift value
+        :param t:
+        :return:
+        """
+        t = torch.clamp(t, min=1e-3)
+        basic_feats = torch.stack([t, torch.log(t), t ** 2, t ** 0.5], dim=-1)
+        fourier_feat = self.fourier_feats(t)
+        feat = torch.cat([basic_feats, fourier_feat], dim=-1)  # (N_real, 4 + 2 * num_bands)
+        return self.ln(feat)
 
 
-def velocity_fe(v):
-    """
-    Feature extraction for velocity value
-    :param v:
-    :return:
-    """
-    # Normalize to avoid log(0)
-    v = torch.clamp(v, min=1e-3)
-    return torch.stack([v, torch.log(v), v ** 2, v ** 0.5], dim=-1)
+class VelocityFE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ln = nn.LayerNorm(4)
+
+    def forward(self, v):
+        """
+        Feature extraction for velocity value
+        :param v:
+        :return:
+        """
+        # Normalize to avoid log(0)
+        v = torch.clamp(v, min=1e-3)
+        feat = torch.stack([v, torch.log(v), v ** 2, v ** 0.5], dim=-1)
+        return self.ln(feat)
+
+
+def get_sinusoidal_positional_encoding(seq_len, dim, device):
+    position = torch.arange(seq_len, dtype=torch.float, device=device).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, dim, 2, dtype=torch.float, device=device) * (-math.log(10000.0) / dim))
+    pe = torch.zeros(seq_len, dim, device=device)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe  # shape: (seq_len, dim)
 
 
 class HybridEmbedding(nn.Module):
-    def __init__(self, discrete_vocab_size, embed_dim, max_len):
+    def __init__(self, discrete_vocab_size, embed_dim, max_len, num_bands=4):
         super().__init__()
         self.embed_dim = embed_dim
         self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
+
+        self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim))
+
+        self.timeshift_fe = TimeShiftFE(num_bands=num_bands)
+        self.velocity_fe = VelocityFE()
+
         self.timeshift_embedding = nn.Sequential(
-            nn.Linear(4, embed_dim),  # four extracted features
-            nn.ReLU()
+            nn.Linear(4 + 2 * num_bands, embed_dim),  # four extracted features
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
         )
         self.velocity_embedding = nn.Sequential(
-            nn.Linear(4, embed_dim),
-            nn.ReLU())
+            nn.Linear(4, embed_dim),  # four extracted features
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+        )
+
         self.position_embedding = torch.nn.Embedding(max_len, embed_dim)
 
         self.discrete_layer_norm = nn.LayerNorm(embed_dim)
@@ -90,23 +131,22 @@ class HybridEmbedding(nn.Module):
         timeshift_mask = (token_types == TS_TYPE)
         if timeshift_mask.any():
             embeddings[timeshift_mask] = embed_cont_tokens(masked_vals=input_ids[timeshift_mask],
-                                                           feat_extr_func=timeshift_fe,
+                                                           feat_extr_func=self.timeshift_fe,
                                                            embed_func=self.timeshift_embedding,
                                                            layer_norm=self.timeshift_layer_norm,
-                                                           mask_id=-TIMESHIFT_MASK)
+                                                           mask_id=-1 * TIMESHIFT_MASK)
 
         velocity_mask = (token_types == VEL_TYPE)
         if velocity_mask.any():
             embeddings[velocity_mask] = embed_cont_tokens(masked_vals=input_ids[velocity_mask],
-                                                          feat_extr_func=velocity_fe,
+                                                          feat_extr_func=self.velocity_fe,
                                                           embed_func=self.velocity_embedding,
                                                           layer_norm=self.velocity_layer_norm,
-                                                          mask_id=-VELOCITY_MASK
-                                                          )
+                                                          mask_id=-1 * VELOCITY_MASK)
 
         # --- Add position embedding ---
         pos_ids = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
-        embeddings += self.position_embedding(pos_ids)
+        embeddings += self.position_embedding(pos_ids) + self.sinusoidal_pe[pos_ids]
         return embeddings
 
 
