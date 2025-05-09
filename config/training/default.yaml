@@ -2,6 +2,6 @@ batch_size: 32
 num_workers_train: 6
 num_workers_val: 2
 max_epochs: 20
-accelerator: cpu
+accelerator: gpu
 ckpt_path: null
 lr: 1e-4
