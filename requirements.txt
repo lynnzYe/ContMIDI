@@ -13,7 +13,6 @@ absl-py
 pyyaml
 matplotlib
 requests
-zlib
 attrs
 mido
 pytorch-lightning
