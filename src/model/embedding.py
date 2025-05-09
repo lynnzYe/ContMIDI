@@ -14,7 +14,7 @@ class TimeShiftFE(nn.Module):
     def __init__(self, num_bands=4):
         super().__init__()
         self.num_bands = num_bands
-        self.ln = nn.LayerNorm(4)
+        self.ln = nn.LayerNorm(4 + num_bands * 2)
 
     def fourier_feats(self, t):
         # Fourier features:
