@@ -19,3 +19,4 @@ pytorch-lightning
 setuptools
 hydra-core
 omegaconf
+tensorflow
