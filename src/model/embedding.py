@@ -14,7 +14,7 @@ class TimeShiftFE(nn.Module):
     def __init__(self, num_bands=4):
         super().__init__()
         self.num_bands = num_bands
-        self.ln = nn.LayerNorm(4)
+        self.ln = nn.LayerNorm(4 + num_bands * 2)
 
     def fourier_feats(self, t):
         # Fourier features:
@@ -67,7 +67,8 @@ class HybridEmbedding(nn.Module):
         self.embed_dim = embed_dim
         self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
 
-        self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim))
+        self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim,
+                                                                                 device=self.token_embedding.weight.device))
 
         self.timeshift_fe = TimeShiftFE(num_bands=num_bands)
         self.velocity_fe = VelocityFE()

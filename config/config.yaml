@@ -5,7 +5,7 @@ defaults:
   - loss_weighting: default
 
 project_name: mix-token-bert
-run_name: v0.1
+run_name: v0.2
 log_model: all
 logger: wandb
-data_dir: /Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data
+data_dir: /kaggle/input/mstro-cont
