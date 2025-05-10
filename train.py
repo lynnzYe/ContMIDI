@@ -40,7 +40,8 @@ def train(cfg: DictConfig):
     train_data, val_data, test_data = load_dataset(cfg.data_dir)
 
     train_loader = DataLoader(train_data, batch_size=cfg.training.batch_size,
-                              shuffle=True, num_workers=cfg.training.num_workers_train)
+                              shuffle=True, num_workers=cfg.training.num_workers_train,
+                              persistent_workers=True)
     val_loader = DataLoader(val_data, batch_size=cfg.training.batch_size, num_workers=cfg.training.num_workers_val)
     # test_loader = DataLoader(test_data, batch_size=32, num_workers=2)
 
