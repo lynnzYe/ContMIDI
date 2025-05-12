@@ -144,12 +144,7 @@ class LitBertMLM(pl.LightningModule):
         self.log("val_loss", total_loss, prog_bar=True, on_step=False, on_epoch=True)
 
     def configure_optimizers(self):
-        ts_params = list(self.model.ts_regressor.parameters())
-        ts_param_ids = set(id(p) for p in ts_params)
-        base_params = [p for p in self.parameters() if id(p) not in ts_param_ids]
-
-        return torch.optim.AdamW([{'params': base_params, 'lr': self.lr},
-                                  {'params': ts_params, 'lr': self.lr * 5}])
+        return torch.optim.AdamW(self.parameters(), lr=self.lr)
 
 
 def main():

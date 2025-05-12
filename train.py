@@ -10,6 +10,7 @@ from pytorch_lightning import Trainer
 from torch.utils.data import DataLoader
 from src.data.create_dataset import load_dataset
 from src.model.bert_mixed import LitMixBertMLM
+from src.model.bert_discrete import LitBertMLM
 from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
@@ -31,6 +32,20 @@ def get_logger(cfg):
     return CSVLogger("logs", name=cfg.project_name)
 
 
+def build_model(cfg, vocab_size, max_seq_len):
+    mode = cfg.mode
+    if mode == 'continuous':
+        return LitMixBertMLM(vocab_size=vocab_size, n_layers=cfg.model.n_layers, n_heads=cfg.model.n_heads,
+                             n_embed=cfg.model.n_embed, max_seq_len=max_seq_len, dropout=cfg.model.dropout,
+                             lr=cfg.training.lr)
+    elif mode == 'discrete':
+        return LitBertMLM(vocab_size=vocab_size, n_layers=cfg.model.n_layers, n_heads=cfg.model.n_heads,
+                          n_embed=cfg.model.n_embed, max_seq_len=max_seq_len, dropout=cfg.model.dropout,
+                          lr=cfg.training.lr)
+    else:
+        raise NotImplementedError("Unknown model type")
+
+
 @hydra.main(config_path="config", config_name="config", version_base="1.3")
 def train(cfg: DictConfig):
     data_info = torch.load(cfg.data_dir + '/data_info.pt')
@@ -45,9 +60,7 @@ def train(cfg: DictConfig):
     val_loader = DataLoader(val_data, batch_size=cfg.training.batch_size, num_workers=cfg.training.num_workers_val)
     # test_loader = DataLoader(test_data, batch_size=32, num_workers=2)
 
-    model = LitMixBertMLM(vocab_size=vocab_size, n_layers=cfg.model.n_layers, n_heads=cfg.model.n_heads,
-                          n_embed=cfg.model.n_embed, max_seq_len=max_seq_len, dropout=cfg.model.dropout,
-                          lr=cfg.training.lr)
+    model = build_model(cfg, vocab_size=vocab_size, max_seq_len=max_seq_len)
 
     checkpoint_callback = ModelCheckpoint(
         monitor=cfg.checkpoint.monitor,
