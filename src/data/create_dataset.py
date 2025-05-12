@@ -449,7 +449,6 @@ def ftest_create_input():
     token_ids, masks, types = create_input_from_midi('debug_files/long_rest.mid', config)
     print("No. of items:", token_ids.shape[0])
     print("Seq len:", token_ids.shape[1])
-    print("Class size:", token_ids.shape[2])
     pass
 
 

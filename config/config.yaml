@@ -7,5 +7,5 @@ defaults:
 project_name: mix-token-bert
 run_name: v0.2
 log_model: all
-logger: csv
+logger: wandb
 data_dir: /Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data
