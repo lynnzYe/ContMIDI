@@ -8,5 +8,5 @@ mode: discrete
 project_name: mix-token-bert
 run_name: v0.1_discrete
 log_model: all
-logger: wandb
+logger: csv
 data_dir: /Users/kurono/Documents/github/ContinuousMIDI/tmp/maestro_data_discrete
