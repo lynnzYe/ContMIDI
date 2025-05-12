@@ -92,8 +92,8 @@ class LitBertMLM(pl.LightningModule):
         self.lr = lr
         self.loss_weighting = None
         self.note_loss = NoteCrossEntropy()
-        self.timeshift_loss = TokenCrossEntropy(types_considered=[TS_TYPE])
-        self.velocity_loss = TokenCrossEntropy(types_considered=[VEL_TYPE])
+        self.timeshift_loss = TokenCrossEntropy(types_considered=[TS_TYPE], device=self.device)
+        self.velocity_loss = TokenCrossEntropy(types_considered=[VEL_TYPE], device=self.device)
         self.initialize_weights()
 
     def initialize_weights(self):

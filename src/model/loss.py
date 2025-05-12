@@ -28,12 +28,14 @@ class NoteCrossEntropy(nn.Module):
 
 class TokenCrossEntropy(nn.Module):
     def __init__(self, criterion: nn.Module = nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL_INDEX),
-                 types_considered=[NOTE_TYPE, TS_TYPE, VEL_TYPE]):
+                 types_considered=[NOTE_TYPE, TS_TYPE, VEL_TYPE], device=torch.device('cpu')):
         super().__init__()
         self.criterion = criterion
-        self.types_considered = torch.tensor(types_considered)
+        self.types_considered = torch.tensor(types_considered, device=device)
 
     def forward(self, logits: torch.Tensor, types: torch.Tensor, all_labels):
+        if types.device != self.types_considered.device:
+            self.types_considered = self.types_considered.to(types.device)
         note_mask = torch.isin(types, self.types_considered)
         if not note_mask.any():
             return torch.tensor(0.0, device=logits.device)
