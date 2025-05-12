@@ -26,6 +26,22 @@ class NoteCrossEntropy(nn.Module):
         return self.criterion(note_logits, note_labels)
 
 
+class TokenCrossEntropy(nn.Module):
+    def __init__(self, criterion: nn.Module = nn.CrossEntropyLoss(ignore_index=IGNORE_LABEL_INDEX),
+                 types_considered=[NOTE_TYPE, TS_TYPE, VEL_TYPE]):
+        super().__init__()
+        self.criterion = criterion
+        self.types_considered = torch.tensor(types_considered)
+
+    def forward(self, logits: torch.Tensor, types: torch.Tensor, all_labels):
+        note_mask = torch.isin(types, self.types_considered)
+        if not note_mask.any():
+            return torch.tensor(0.0, device=logits.device)
+        note_labels = all_labels[note_mask]
+        note_logits = logits[note_mask]
+        return self.criterion(note_logits, note_labels)
+
+
 class VelocityLoss(nn.Module):
     def __init__(self, criterion: nn.Module = nn.SmoothL1Loss()):
         super().__init__()

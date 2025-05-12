@@ -1,16 +1,13 @@
 """
 Author: Lynn Ye
-Created on: 2025/4/11
-Brief: 
+Created on: 2025/5/12
+Brief: reference - https://github.com/StepanTita/nano-BERT
 """
+
 import torch
 import math
-import pytorch_lightning as pl
 
-from src.model.embedding import HybridEmbedding
-from src.model.loss import LossWeighting, GradientsLossWeighting, NoteCrossEntropy, VelocityLoss, TimeshiftLoss
-from src.util.definitions import IGNORE_LABEL_INDEX, NOTE_TYPE, TS_TYPE, VEL_TYPE, NOTE_MASK, TIMESHIFT_MASK, \
-    VELOCITY_MASK
+from src.util.definitions import NOTE_MASK, TIMESHIFT_MASK, VELOCITY_MASK, IGNORE_LABEL_INDEX
 
 
 class BertAttentionHead(torch.nn.Module):
@@ -150,80 +147,6 @@ class BertPooler(torch.nn.Module):
         return out
 
 
-class NanoBERT(torch.nn.Module):
-    """
-    NanoBERT is a almost an exact copy of a transformer decoder part described in the paper "Attention is all you need"
-    This is a base model that can be used for various purposes such as Masked Language Modelling, Classification,
-    Or any other kind of NLP tasks.
-    This implementation does not cover the Seq2Seq problem, but can be easily extended to that.
-    """
-
-    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16):
-        super().__init__()
-
-        self.embedding = HybridEmbedding(discrete_vocab_size=vocab_size, embed_dim=n_embed, max_len=max_seq_len)
-
-        self.encoder = BertEncoder(n_layers, n_heads, dropout, n_embed)
-
-        self.pooler = BertPooler(dropout, n_embed)
-
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None):
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_ids)
-
-        emb_output = self.embedding(input_ids, token_type_ids)
-        encoded = self.encoder(emb_output, attention_mask)
-        pooled = self.pooler(encoded)
-        return pooled
-
-
-class NanoBertMLM(torch.nn.Module):
-    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16):
-        super().__init__()
-        self.bert = NanoBERT(vocab_size=vocab_size, n_layers=n_layers, n_heads=n_heads, dropout=dropout,
-                             n_embed=n_embed, max_seq_len=max_seq_len)
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Linear(in_features=n_embed, out_features=n_embed),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(in_features=n_embed, out_features=vocab_size)
-        )
-        # Predicts value [0, 1]
-        self.vel_regressor = torch.nn.Sequential(
-            torch.nn.Linear(n_embed, n_embed),
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(n_embed, n_embed),
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(n_embed, 1),  # output a scalar
-            torch.nn.Sigmoid()
-        )
-        # Timeshift regressor predicts log-transformed time shift values
-        self.ts_regressor = torch.nn.Sequential(
-            torch.nn.Linear(n_embed, n_embed),
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(n_embed, n_embed),
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(n_embed, 1),  # output a scalar
-        )
-
-    def forward(self, input_ids: torch.Tensor, token_types: torch.Tensor, attention_mask: torch.Tensor):
-        hidden = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_types)
-        cls_logits = self.classifier(hidden)
-        ts_reg_preds = self.ts_regressor(hidden).squeeze(-1)  # learn to output log-transformed timeshift values
-        vel_reg_preds = self.vel_regressor(hidden).squeeze(-1)  # output [0, 1]
-        return {
-            'note': cls_logits,
-            'timeshift': ts_reg_preds,
-            'velocity': vel_reg_preds
-        }
-
-
 def mask_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: dict or None = None,
                mask_token_ids: dict or None = None):
     """
@@ -242,8 +165,8 @@ def mask_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: 
     if mask_token_ids is None:
         mask_token_ids = {
             'note': NOTE_MASK,
-            'timeshift': TIMESHIFT_MASK,
-            'velocity': VELOCITY_MASK,
+            'timeshift': TIMESHIFT_MASK,  # Regressor cannot distinguish a positive mask value and a timeshift value
+            'velocity': VELOCITY_MASK,  # Therefore, we use negative values - reserved for masks
         }
 
     device = input_ids.device
@@ -264,118 +187,41 @@ def mask_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: 
     return masked_input, labels
 
 
-def train_step(model, input_ids, attention_mask, token_types, note_loss, velocity_loss, timeshift_loss, loss_weighting):
-    masked_input, labels = mask_input(input_ids, token_types)
-    output_dict = model(masked_input, token_types, attention_mask)
-    cls_logits = output_dict['note']
-    vel_preds = output_dict['velocity']
-    ts_preds = output_dict['timeshift']
+def mask_discrete_input(input_ids: torch.Tensor, token_types: torch.Tensor, mask_config: dict or None = None,
+                        mask_token_ids: dict or None = None):
+    """
+    :param input_ids:
+    :param token_types:
+    :param mask_config: assign mask probabilities
+    :param mask_token_ids:  assign token id for masking
+    :return:
+    """
+    if mask_config is None:
+        mask_config = {
+            'note': 0.15,
+            'velocity': 0.15,
+            'timeshift': 0.15
+        }
+    if mask_token_ids is None:
+        mask_token_ids = {
+            'note': NOTE_MASK,
+            'timeshift': -1 * TIMESHIFT_MASK,  # Discrete model can take input of positive values (token map)
+            'velocity': -1 * VELOCITY_MASK,
+        }
 
-    note_loss = note_loss(cls_logits, token_types, labels)
-    velocity_loss = velocity_loss(vel_preds, token_types, labels)
-    timeshift_loss = timeshift_loss(ts_preds, token_types, labels)
-    combined_loss = loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
-    loss_dict = dict(note=note_loss,
-                     vel=velocity_loss,
-                     ts=timeshift_loss,
-                     loss=combined_loss)
-    return loss_dict, combined_loss
+    device = input_ids.device
+    labels = input_ids.clone()
+    masked_input = input_ids.clone()
 
+    # TODO @Bmois you did not add 10% keep 10% random walk....
+    for type_id, type_name in zip([0, 1, 2], ['note', 'timeshift', 'velocity']):
+        type_mask = (token_types == type_id)
+        prob = mask_config.get(type_name, 0.0)
+        mask_decision = torch.bernoulli(torch.full_like(input_ids, prob, dtype=torch.float, device=device)).bool()
+        mask_mask = type_mask & mask_decision
 
-class LitBertMLM(pl.LightningModule):
-    def __init__(self, vocab_size, n_layers=2, n_heads=1, dropout=0.1, n_embed=3, max_seq_len=16, lr=1e-5):
-        super().__init__()
-        self.save_hyperparameters()
-        self.model = NanoBertMLM(vocab_size, n_layers, n_heads, dropout, n_embed, max_seq_len)
-        self.lr = lr
-        self.loss_weighting = None
-        self.note_loss = NoteCrossEntropy()
-        self.velocity_loss = VelocityLoss()
-        self.timeshift_loss = TimeshiftLoss()
-        self.initialize_weights()
+        masked_input[mask_mask] = mask_token_ids[type_name]
+        labels[~mask_mask & type_mask] = IGNORE_LABEL_INDEX  # Only mask label for unmasked tokens of this type
 
-    def initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, torch.nn.Linear):
-                torch.nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
-                if m.bias is not None:
-                    torch.nn.init.zeros_(m.bias)
-
-    def on_fit_start(self) -> None:
-        for callback in self.trainer.callbacks:
-            if isinstance(callback, LossWeighting):
-                self.loss_weighting = callback
-                break
-        if self.loss_weighting is None:
-            self.loss_weighting = LossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0})
-        self.loss_weighting.last_layer = self.model.bert.encoder.get_last_layer_weights()
-
-    def forward(self, input_ids, token_types=None, attention_mask=None):
-        return self.model(input_ids=input_ids, token_types=token_types, attention_mask=attention_mask)
-
-    def training_step(self, batch, batch_idx):
-        input_ids, attention_mask, token_types = batch
-        loss_dict, total_loss = train_step(self.model, input_ids, attention_mask, token_types, self.note_loss,
-                                           self.velocity_loss, self.timeshift_loss, self.loss_weighting)
-        self.log_dict({f"loss/{k}/train": v for k, v in loss_dict.items()}, sync_dist=False)
-
-        return total_loss
-
-    def validation_step(self, batch, batch_idx):
-        input_ids, attention_mask, token_types = batch
-        masked_input, labels = mask_input(input_ids, token_types)
-        output_dict = self(masked_input, token_types, attention_mask)
-        cls_logits = output_dict['note']
-        vel_preds = output_dict['velocity']
-        ts_preds = output_dict['timeshift']
-
-        note_loss = self.note_loss(cls_logits, token_types, labels)
-        velocity_loss = self.velocity_loss(vel_preds, token_types, labels)
-        timeshift_loss = self.timeshift_loss(ts_preds, token_types, labels)
-        total_loss = self.loss_weighting.combine_losses(note=note_loss, vel=velocity_loss, ts=timeshift_loss)
-        loss_dict = dict(note=note_loss,
-                         vel=velocity_loss,
-                         ts=timeshift_loss,
-                         loss=total_loss)
-
-        self.log_dict({f"loss/{k}/train": v for k, v in loss_dict.items()}, sync_dist=False)
-        self.log("val_loss", total_loss, prog_bar=True, on_step=False, on_epoch=True)
-
-    def configure_optimizers(self):
-        ts_params = list(self.model.ts_regressor.parameters())
-        ts_param_ids = set(id(p) for p in ts_params)
-        base_params = [p for p in self.parameters() if id(p) not in ts_param_ids]
-
-        return torch.optim.AdamW([{'params': base_params, 'lr': self.lr},
-                                  {'params': ts_params, 'lr': self.lr * 5}])
-
-
-def main():
-    # Test configuration
-    vocab_size = 356
-    max_seq_len = 128
-    batch_size = 8
-
-    # Initialize model
-    model = NanoBertMLM(vocab_size=vocab_size, max_seq_len=max_seq_len)
-
-    # Generate random input data
-    input_ids = torch.randint(low=0, high=vocab_size, size=(batch_size, max_seq_len))
-    token_types = torch.randint(0, 3, [batch_size, max_seq_len])
-    attention_mask = torch.ones_like(input_ids)
-
-    note_loss_fn = NoteCrossEntropy()
-    velocity_loss_fn = VelocityLoss()
-    timeshift_loss_fn = TimeshiftLoss()
-    model.eval()  # Set model to evaluation mode
-    with torch.no_grad():
-        loss_dict, total_loss = train_step(model, input_ids, attention_mask, token_types, note_loss_fn,
-                                           velocity_loss_fn, timeshift_loss_fn,
-                                           LossWeighting(weights={'note': 1.0, 'vel': 1.0, 'ts': 1.0}))
-
-    # Check output
-    print(f"Loss: {total_loss}")
-
-
-if __name__ == "__main__":
-    main()
+    labels[~((token_types == 0) | (token_types == 1) | (token_types == 2))] = IGNORE_LABEL_INDEX
+    return masked_input, labels

@@ -61,24 +61,55 @@ def get_sinusoidal_positional_encoding(seq_len, dim, device):
     return pe  # shape: (seq_len, dim)
 
 
+class DiscreteEmbedding(nn.Module):
+    def __init__(self, discrete_vocab_size, embed_dim, max_len):
+        super().__init__()
+        self.max_len = max_len
+        self.embed_dim = embed_dim
+        self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
+        # self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim,
+        #                                                                          device=self.token_embedding.weight.device))
+        self.position_embedding = torch.nn.Embedding(max_len, embed_dim)
+
+        self.layer_norm = torch.nn.LayerNorm(embed_dim, eps=1e-12, elementwise_affine=True)
+        self.dropout = torch.nn.Dropout(p=0.1, inplace=False)
+
+    def forward(self, input_ids: torch.Tensor):
+        B, T = input_ids.shape
+        D = self.token_embedding.embedding_dim
+        device = input_ids.device
+
+        token_embeddings = self.token_embedding(input_ids)
+
+        position_ids = torch.arange(self.max_len, dtype=torch.long, device=device)
+        position_embeddings = self.position_embedding(position_ids)
+
+        embeddings = token_embeddings + position_embeddings
+        # embeddings += self.position_embedding(pos_ids) + self.sinusoidal_pe[pos_ids]
+
+        embeddings = self.layer_norm(embeddings)
+        embeddings = self.dropout(embeddings)
+
+        return embeddings
+
+
 class HybridEmbedding(nn.Module):
     def __init__(self, discrete_vocab_size, embed_dim, max_len, num_bands=4):
         super().__init__()
+        self.max_len = max_len
         self.embed_dim = embed_dim
         self.token_embedding = nn.Embedding(discrete_vocab_size, embed_dim)
-
-        self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim,
-                                                                                 device=self.token_embedding.weight.device))
-
-        self.timeshift_fe = TimeShiftFE(num_bands=num_bands)
-        self.velocity_fe = VelocityFE()
+        # self.register_buffer('sinusoidal_pe', get_sinusoidal_positional_encoding(max_len, embed_dim,
+        #                                                                          device=self.token_embedding.weight.device))
 
         self.timeshift_embedding = nn.Sequential(
+            TimeShiftFE(num_bands=num_bands),
             nn.Linear(4 + 2 * num_bands, embed_dim),  # four extracted features
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
         )
         self.velocity_embedding = nn.Sequential(
+            VelocityFE(),
             nn.Linear(4, embed_dim),  # four extracted features
             nn.Linear(embed_dim, embed_dim),
             nn.GELU(),
@@ -90,6 +121,9 @@ class HybridEmbedding(nn.Module):
         self.timeshift_layer_norm = nn.LayerNorm(embed_dim)
         self.velocity_layer_norm = nn.LayerNorm(embed_dim)
 
+        self.layer_norm = torch.nn.LayerNorm(embed_dim, eps=1e-12, elementwise_affine=True)
+        self.dropout = torch.nn.Dropout(p=0.1, inplace=False)
+
     def forward(self, input_ids: torch.Tensor, token_types: torch.Tensor):
         """
         token_types: tensor of shape (batch, seq_len), values are 'discrete' or 'continuous'
@@ -98,27 +132,26 @@ class HybridEmbedding(nn.Module):
         D = self.token_embedding.embedding_dim
         device = input_ids.device
 
-        def embed_cont_tokens(masked_vals: torch.Tensor, feat_extr_func, embed_func, layer_norm, mask_id):
+        def embed_cont_tokens(masked_vals: torch.Tensor, embed_func, layer_norm, mask_id):
             N = masked_vals.size(0)
-            real_input_pos = masked_vals >= 0
+            real_input_pos = masked_vals >= 0  # Values < 0 are considered masked
             cont_embedding = torch.zeros(N, D, dtype=torch.float,
                                          device=device)  # placeholder
             if real_input_pos.any():
                 real_vals = masked_vals[real_input_pos].float()
-                real_feats = feat_extr_func(real_vals)  # → (N_real, feat_dim)
-                real_emb = embed_func(real_feats)
+                real_emb = embed_func(real_vals)
                 real_emb = layer_norm(real_emb)
                 cont_embedding[real_input_pos] = real_emb
             if (~real_input_pos).any():
                 mask_pos = (~real_input_pos).nonzero(as_tuple=False).squeeze(-1)
                 # Look up mask vector
                 mask_emb = self.token_embedding(torch.full(
-                    (mask_pos.size(0),), mask_id, dtype=torch.long, device=device
-                ))
+                    (mask_pos.size(0),), mask_id, dtype=torch.long, device=device))
                 cont_embedding[mask_pos] = mask_emb
             return cont_embedding
 
         embeddings = torch.zeros(B, T, self.token_embedding.embedding_dim, device=device)
+
         # --- Discrete tokens ---
         discrete_mask = (token_types == NOTE_TYPE)  # (B, T)
         if discrete_mask.any():
@@ -132,7 +165,6 @@ class HybridEmbedding(nn.Module):
         timeshift_mask = (token_types == TS_TYPE)
         if timeshift_mask.any():
             embeddings[timeshift_mask] = embed_cont_tokens(masked_vals=input_ids[timeshift_mask],
-                                                           feat_extr_func=self.timeshift_fe,
                                                            embed_func=self.timeshift_embedding,
                                                            layer_norm=self.timeshift_layer_norm,
                                                            mask_id=-1 * TIMESHIFT_MASK)
@@ -140,14 +172,18 @@ class HybridEmbedding(nn.Module):
         velocity_mask = (token_types == VEL_TYPE)
         if velocity_mask.any():
             embeddings[velocity_mask] = embed_cont_tokens(masked_vals=input_ids[velocity_mask],
-                                                          feat_extr_func=self.velocity_fe,
                                                           embed_func=self.velocity_embedding,
                                                           layer_norm=self.velocity_layer_norm,
                                                           mask_id=-1 * VELOCITY_MASK)
 
         # --- Add position embedding ---
         pos_ids = torch.arange(T, device=device).unsqueeze(0).expand(B, T)
-        embeddings += self.position_embedding(pos_ids) + self.sinusoidal_pe[pos_ids]
+        embeddings += self.position_embedding(pos_ids)
+        # embeddings += self.position_embedding(pos_ids) + self.sinusoidal_pe[pos_ids]
+
+        embeddings = self.layer_norm(embeddings)
+        embeddings = self.dropout(embeddings)
+
         return embeddings
 
 
